@@ -58,15 +58,25 @@ function saveSessions(sessions) {
 let cachedCollegesMap = null;
 let lastCollegesFetchTime = 0;
 
+// Keep Render backend awake every 10 minutes to prevent free-tier spin-down
+setInterval(async () => {
+    try {
+        await axios.get(`${BACKEND_BASE}/api/system/db-status`, { timeout: 15000 });
+        console.log('⚡ Render Backend Keep-Alive Ping: OK');
+    } catch (e) {
+        console.log('⚡ Render Backend Keep-Alive Notice:', e.message);
+    }
+}, 10 * 60 * 1000);
+
 async function getCollegesAndBlocks() {
     const now = Date.now();
-    // Cache for 30 seconds so online printer availability is fresh
-    if (cachedCollegesMap && (now - lastCollegesFetchTime < 30 * 1000)) {
+    // Cache for 60 seconds so online printer availability is fresh but fast
+    if (cachedCollegesMap && (now - lastCollegesFetchTime < 60 * 1000)) {
         return cachedCollegesMap;
     }
 
     try {
-        const res = await axios.get(`${BACKEND_BASE}/api/blocks/online`, { timeout: 6000 });
+        const res = await axios.get(`${BACKEND_BASE}/api/blocks/online`, { timeout: 20000 });
         if (res.data && Array.isArray(res.data) && res.data.length > 0) {
             const map = {};
             res.data.forEach(item => {
@@ -81,7 +91,7 @@ async function getCollegesAndBlocks() {
             return map;
         }
     } catch (e) {
-        console.error('Online blocks lookup notice:', e.message);
+        console.error('Online blocks lookup notice (using cache/default):', e.message);
     }
 
     if (cachedCollegesMap) return cachedCollegesMap;
@@ -1085,7 +1095,7 @@ async function handleIncomingMessage(msg) {
                     try {
                         const remoteForm = createUploadFormData(session, senderName, senderPhone);
                         const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
-                        uploadRes = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 60000 });
+                        uploadRes = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 90000 });
                     } catch (remoteErr) {
                         console.error("Order creation failed on backend:", remoteErr.message);
                         const errorMsg = (typeof remoteErr.response?.data === 'string' && remoteErr.response.data)
@@ -1098,7 +1108,7 @@ async function handleIncomingMessage(msg) {
                     const orderId = uploadRes.data?.orderId || 'ORD2026';
 
                     try {
-                        const walletRes = await axios.post(`${BACKEND_BASE}/api/bot/pay-via-wallet?orderId=${orderId}&phoneNumber=${senderPhone}`, null, { timeout: 10000 });
+                        const walletRes = await axios.post(`${BACKEND_BASE}/api/bot/pay-via-wallet?orderId=${orderId}&phoneNumber=${senderPhone}`, null, { timeout: 15000 });
                         const wData = walletRes.data || {};
                         if (wData.success) {
                             const paidMsg = `✅ *Payment Successful via Wallet Balance!* 🎉\n` +
@@ -1137,7 +1147,7 @@ async function handleIncomingMessage(msg) {
                     try {
                         const remoteForm = createUploadFormData(session, senderName, senderPhone);
                         const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
-                        response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 60000 });
+                        response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 90000 });
                     } catch (remoteErr) {
                         console.error("Order creation failed on backend:", remoteErr.message);
                         const errorMsg = (typeof remoteErr.response?.data === 'string' && remoteErr.response.data)

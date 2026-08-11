@@ -92,6 +92,22 @@ async function getCollegesAndBlocks() {
     };
 }
 
+async function checkKioskPrinterStatus(blockLocation, printType = 'BW') {
+    if (!blockLocation) return { available: false, message: 'No kiosk block specified' };
+    try {
+        const res = await axios.get(`${BACKEND_BASE}/api/printer/availability?blockLocation=${encodeURIComponent(blockLocation)}&printType=${printType}`, { timeout: 10000 });
+        if (res.data) {
+            return {
+                available: Boolean(res.data.available),
+                message: res.data.message || 'Printer is available'
+            };
+        }
+    } catch (e) {
+        console.error(`Printer status check error for ${blockLocation}:`, e.message);
+    }
+    return { available: true, message: 'OK' };
+}
+
 function getPDFPageCount(buffer) {
     try {
         const text = buffer.toString('latin1');
@@ -839,6 +855,23 @@ async function handleIncomingMessage(msg) {
             }
 
             if (chosenBlock && blocks.includes(chosenBlock)) {
+                // Real-time live check before confirming block
+                const status = await checkKioskPrinterStatus(chosenBlock, 'BW');
+                if (!status.available) {
+                    await sock.sendMessage(jid, {
+                        text: `⚠️ *Kiosk Offline Alert*:\n${status.message}\n\nPlease choose an active online kiosk block from below:`
+                    });
+                    await sendSmartMenu(
+                        sock,
+                        jid,
+                        `🟢 Available Online Kiosks (${session.college})`,
+                        'Please select an active, operational kiosk below:',
+                        'Select Online Kiosk',
+                        blocks.map(b => `🟢 📍 ${b}`)
+                    );
+                    return;
+                }
+
                 session.blockLocation = chosenBlock;
                 session.step = 'IDLE';
                 saveSessions(sessions);
@@ -846,8 +879,8 @@ async function handleIncomingMessage(msg) {
                 await sendSmartMenu(
                     sock,
                     jid,
-                    `✅ Active Online Kiosk: ${chosenBlock}`,
-                    `Campus: *${session.college}*\nStatus: 🟢 **ONLINE & READY**\n\n🖨️ Simply attach and send your **PDF file or Image** to start your print order!`,
+                    `✅ Verified Online Kiosk: ${chosenBlock}`,
+                    `Campus: *${session.college}*\nPrinter Status: 🟢 **ONLINE & READY**\n\n🖨️ Simply attach and send your **PDF file or Image** to start your print order!`,
                     'Ready to Print'
                 );
                 return;
@@ -882,6 +915,31 @@ async function handleIncomingMessage(msg) {
         const imgMsg = messageContent?.imageMessage;
 
         if (docMsg || imgMsg) {
+            // Verify that the target kiosk printer is currently online before accepting document
+            if (session.blockLocation) {
+                const printerCheck = await checkKioskPrinterStatus(session.blockLocation, 'BW');
+                if (!printerCheck.available) {
+                    session.step = 'SELECT_BLOCK';
+                    saveSessions(sessions);
+                    const blocks = collegesMap[session.college] || [];
+                    await sock.sendMessage(jid, {
+                        text: `⚠️ *Kiosk Offline Alert*:\nYour selected kiosk (*${session.blockLocation}*) is currently offline or under maintenance.\n\n` +
+                              `Please select an active online kiosk block below before uploading your document:`
+                    });
+                    if (blocks.length > 0) {
+                        await sendSmartMenu(
+                            sock,
+                            jid,
+                            `🟢 Online Kiosks (${session.college || 'Campus'})`,
+                            'Please select an active online kiosk below:',
+                            'Select Kiosk Block',
+                            blocks.map(b => `🟢 📍 ${b}`)
+                        );
+                    }
+                    return;
+                }
+            }
+
             await sock.sendMessage(jid, { text: "⏳ *Downloading and analyzing your document via Baileys Direct Engine... Please wait.*" });
 
             let buffer;
@@ -1096,6 +1154,13 @@ async function handleIncomingMessage(msg) {
                     await sock.sendMessage(jid, { text: `🔢 *Number of Copies*:\n\nReply with number of copies e.g. *"1"* or *"2"* (default: 1):` });
                     return;
                 } else if (textLower.includes('color') || textLower.includes('colour') || textLower === '2') {
+                    const colorCheck = await checkKioskPrinterStatus(session.blockLocation, 'COLOR');
+                    if (!colorCheck.available) {
+                        await sock.sendMessage(jid, {
+                            text: `⚠️ *Color Printing Unavailable*:\n${colorCheck.message}\n\nPlease choose *1* for Black & White (₹2/pg), or send a different choice:`
+                        });
+                        return;
+                    }
                     session.pending.printType = 'COLOR';
                     session.pending.doubleSided = false;
                     session.step = 'ENTER_COPIES';

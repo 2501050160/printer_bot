@@ -470,8 +470,36 @@ async function startBot() {
     });
 }
 
-function extractPhoneNumber(jid) {
+function extractPhoneNumber(msg, jid) {
     if (!jid) return 'Unknown';
+
+    // 1. If remoteJid ends with @s.whatsapp.net (standard phone JID)
+    if (jid.endsWith('@s.whatsapp.net')) {
+        const clean = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
+        if (clean.length >= 10 && clean.length <= 13 && !clean.startsWith('1655')) {
+            return clean.length === 12 && clean.startsWith('91') ? clean.substring(2) : clean;
+        }
+    }
+
+    // 2. Check participant / participantPn in msg.key
+    const pJid = msg?.key?.participant || msg?.participant || msg?.key?.participantPn;
+    if (pJid && typeof pJid === 'string' && pJid.endsWith('@s.whatsapp.net')) {
+        const clean = pJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+        if (clean.length >= 10 && clean.length <= 13 && !clean.startsWith('1655')) {
+            return clean.length === 12 && clean.startsWith('91') ? clean.substring(2) : clean;
+        }
+    }
+
+    // 3. Check remoteJidAlt / sender
+    const altJid = msg?.key?.remoteJidAlt || msg?.key?.sender || msg?.sender;
+    if (altJid && typeof altJid === 'string' && altJid.endsWith('@s.whatsapp.net')) {
+        const clean = altJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+        if (clean.length >= 10 && clean.length <= 13 && !clean.startsWith('1655')) {
+            return clean.length === 12 && clean.startsWith('91') ? clean.substring(2) : clean;
+        }
+    }
+
+    // 4. Fallback from raw JID
     const clean = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
     return clean.length >= 10 ? clean : 'Unknown';
 }
@@ -481,7 +509,7 @@ async function handleIncomingMessage(msg) {
         const jid = msg.key.remoteJid;
         if (!jid || jid.endsWith('@g.us') || jid === 'status@broadcast') return;
 
-        const senderPhone = extractPhoneNumber(jid);
+        const senderPhone = extractPhoneNumber(msg, jid);
         const senderName = msg.pushName || 'Student';
         const messageContent = msg.message;
         const textMessage = messageContent?.conversation || 
@@ -494,9 +522,11 @@ async function handleIncomingMessage(msg) {
         console.log(`💬 Message received from ${senderPhone} (${senderName}): "${rawText}"`);
 
         const sessions = loadSessions();
-        if (!sessions[senderPhone]) {
-            sessions[senderPhone] = {
-                phoneNumber: senderPhone,
+        const sessionKey = jid; // Primary key by JID to ensure exact device mapping
+        if (!sessions[sessionKey]) {
+            sessions[sessionKey] = {
+                phoneNumber: (senderPhone.length === 10 || (senderPhone.length === 12 && senderPhone.startsWith('91'))) ? senderPhone : null,
+                realPhoneNumber: (senderPhone.length === 10 || (senderPhone.length === 12 && senderPhone.startsWith('91'))) ? senderPhone : null,
                 name: senderName,
                 jid: jid,
                 college: null,
@@ -505,8 +535,32 @@ async function handleIncomingMessage(msg) {
                 pending: null
             };
         }
-        const session = sessions[senderPhone];
+        const session = sessions[sessionKey];
         session.jid = jid;
+        if (senderName && senderName !== 'Student') session.name = senderName;
+
+        // Check if student sent their 10-digit phone number (e.g. 9494189664 or +91 9494189664)
+        const phoneMatch = rawText.match(/^(?:\+?91[\s-]?)?([6-9]\d{9})$/);
+        if (phoneMatch && (!session.pending || session.step === 'ASK_PHONE')) {
+            const clean10 = phoneMatch[1];
+            session.realPhoneNumber = clean10;
+            session.phoneNumber = clean10;
+            session.step = session.pending ? 'SELECT_OPTIONS' : 'IDLE';
+            saveSessions(sessions);
+
+            await sock.sendMessage(jid, { 
+                text: `✅ *Mobile Number Verified & Linked*: *+91 ${clean10}*\n\nYour student print wallet and order history are now registered under *${clean10}*!` 
+            });
+
+            if (session.pending) {
+                // Return to draft confirmation
+                await showOrderSummaryAndOptions(sock, jid, session);
+            }
+            return;
+        }
+
+        const effectivePhone = session.realPhoneNumber || (senderPhone.length === 10 ? senderPhone : (senderPhone.length === 12 && senderPhone.startsWith('91') ? senderPhone.substring(2) : senderPhone));
+
         const collegesMap = await getCollegesAndBlocks();
         const collegeList = Object.keys(collegesMap);
 

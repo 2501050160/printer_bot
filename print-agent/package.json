@@ -1,0 +1,13 @@
+{
+  "name": "cloud-print-agent",
+  "version": "1.0.0",
+  "description": "Shop PC print agent for Cloud Print Platform",
+  "main": "agent.js",
+  "scripts": {
+    "start": "node agent.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "pdf-to-printer": "^5.6.0"
+  }
+}

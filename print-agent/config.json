@@ -1,0 +1,11 @@
+{
+  "backendUrl": "https://printer-backend-kgzp.onrender.com",
+  "pollIntervalMs": 20000,
+  "blocks": [
+    {
+      "blockLocation": "C Block",
+      "printerName": "Brother HL-L2320D series",
+      "apiKey": "1609fdf6-ea86-498c-afe8-cd758e530323"
+    }
+  ]
+}

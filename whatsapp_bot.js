@@ -58,16 +58,6 @@ function saveSessions(sessions) {
 let cachedCollegesMap = null;
 let lastCollegesFetchTime = 0;
 
-// Keep Render backend awake every 10 minutes to prevent free-tier spin-down
-setInterval(async () => {
-    try {
-        await axios.get(`${BACKEND_BASE}/api/system/db-status`, { timeout: 15000 });
-        console.log('⚡ Render Backend Keep-Alive Ping: OK');
-    } catch (e) {
-        console.log('⚡ Render Backend Keep-Alive Notice:', e.message);
-    }
-}, 10 * 60 * 1000);
-
 async function getCollegesAndBlocks() {
     const now = Date.now();
     // Cache for 60 seconds so online printer availability is fresh but fast
@@ -1089,26 +1079,37 @@ async function handleIncomingMessage(msg) {
                                        || (!hasEnoughWallet && (textLower.includes('cancel') || textLower === '2'));
 
                 if (isWalletChoice) {
-                    await sock.sendMessage(jid, { text: "⏳ *Processing instant wallet payment... Please wait.*" });
+                    await sock.sendMessage(jid, { text: "⏳ *Processing instant wallet payment... Waiting for server (up to 5 min)...*" });
 
                     let uploadRes;
                     try {
                         const remoteForm = createUploadFormData(session, senderName, senderPhone);
                         const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
-                        uploadRes = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 90000 });
+                        // 5-Minute timeout (300,000 ms)
+                        uploadRes = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
                     } catch (remoteErr) {
                         console.error("Order creation failed on backend:", remoteErr.message);
-                        const errorMsg = (typeof remoteErr.response?.data === 'string' && remoteErr.response.data)
-                            ? remoteErr.response.data
-                            : (remoteErr.response?.data?.message || "⚠️ *Server Connection Error*: Could not create order. Please try again.");
-                        await sock.sendMessage(jid, { text: errorMsg });
+                        session.pending = null;
+                        session.step = 'IDLE';
+                        saveSessions(sessions);
+
+                        if (remoteErr.code === 'ECONNABORTED' || remoteErr.message.includes('timeout')) {
+                            await sock.sendMessage(jid, { 
+                                text: "❌ *Transaction Failed (5-Min Timeout)*\n\nThe print server did not wake up or respond within 5 minutes.\n\nYour order has been cancelled and not charged. Please try again shortly." 
+                            });
+                        } else {
+                            const errorMsg = (typeof remoteErr.response?.data === 'string' && remoteErr.response.data)
+                                ? remoteErr.response.data
+                                : (remoteErr.response?.data?.message || "❌ *Transaction Failed*: Could not create order on server. Please try again.");
+                            await sock.sendMessage(jid, { text: errorMsg });
+                        }
                         return;
                     }
 
                     const orderId = uploadRes.data?.orderId || 'ORD2026';
 
                     try {
-                        const walletRes = await axios.post(`${BACKEND_BASE}/api/bot/pay-via-wallet?orderId=${orderId}&phoneNumber=${senderPhone}`, null, { timeout: 15000 });
+                        const walletRes = await axios.post(`${BACKEND_BASE}/api/bot/pay-via-wallet?orderId=${orderId}&phoneNumber=${senderPhone}`, null, { timeout: 30000 });
                         const wData = walletRes.data || {};
                         if (wData.success) {
                             const paidMsg = `✅ *Payment Successful via Wallet Balance!* 🎉\n` +
@@ -1141,19 +1142,30 @@ async function handleIncomingMessage(msg) {
                         return;
                     }
                 } else if (isRazorpayChoice) {
-                    await sock.sendMessage(jid, { text: "⏳ *Creating your order and Razorpay payment link... Please wait.*" });
+                    await sock.sendMessage(jid, { text: "⏳ *Creating your order and payment link... Waiting for server (up to 5 min)...*" });
 
                     let response;
                     try {
                         const remoteForm = createUploadFormData(session, senderName, senderPhone);
                         const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
-                        response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 90000 });
+                        // 5-Minute timeout (300,000 ms)
+                        response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
                     } catch (remoteErr) {
                         console.error("Order creation failed on backend:", remoteErr.message);
-                        const errorMsg = (typeof remoteErr.response?.data === 'string' && remoteErr.response.data)
-                            ? remoteErr.response.data
-                            : (remoteErr.response?.data?.message || "⚠️ *Server Error*: Could not generate payment link right now. Please try again later.");
-                        await sock.sendMessage(jid, { text: errorMsg });
+                        session.pending = null;
+                        session.step = 'IDLE';
+                        saveSessions(sessions);
+
+                        if (remoteErr.code === 'ECONNABORTED' || remoteErr.message.includes('timeout')) {
+                            await sock.sendMessage(jid, { 
+                                text: "❌ *Transaction Failed (5-Min Timeout)*\n\nThe print server did not wake up or respond within 5 minutes.\n\nYour order has been cancelled and not charged. Please try again shortly." 
+                            });
+                        } else {
+                            const errorMsg = (typeof remoteErr.response?.data === 'string' && remoteErr.response.data)
+                                ? remoteErr.response.data
+                                : (remoteErr.response?.data?.message || "❌ *Transaction Failed*: Could not generate payment link right now. Please try again later.");
+                            await sock.sendMessage(jid, { text: errorMsg });
+                        }
                         return;
                     }
 

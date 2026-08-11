@@ -29,8 +29,8 @@ const path = require('path');
 const axios = require('axios');
 const FormData = require('form-data');
 
-const BACKEND_URL = process.env.BACKEND_URL || 'https://printer-backend-1.onrender.com/api/bot/direct-upload';
-const BACKEND_BASE = process.env.BACKEND_BASE_URL || 'https://printer-backend-1.onrender.com';
+const BACKEND_URL = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
+const BACKEND_BASE = process.env.BACKEND_BASE_URL || 'https://printer-backend-kgzp.onrender.com';
 const SESSIONS_FILE = path.join(__dirname, 'user_sessions.json');
 const AUTH_DIR = path.join(__dirname, '.baileys_auth');
 
@@ -1084,7 +1084,7 @@ async function handleIncomingMessage(msg) {
                     let uploadRes;
                     try {
                         const remoteForm = createUploadFormData(session, senderName, senderPhone);
-                        const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-1.onrender.com/api/bot/direct-upload';
+                        const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
                         uploadRes = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 60000 });
                     } catch (remoteErr) {
                         console.error("Order creation failed on backend:", remoteErr.message);
@@ -1136,7 +1136,7 @@ async function handleIncomingMessage(msg) {
                     let response;
                     try {
                         const remoteForm = createUploadFormData(session, senderName, senderPhone);
-                        const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-1.onrender.com/api/bot/direct-upload';
+                        const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
                         response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 60000 });
                     } catch (remoteErr) {
                         console.error("Order creation failed on backend:", remoteErr.message);

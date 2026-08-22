@@ -103,10 +103,8 @@ async function processBlock(blockConfig) {
 
     cleanup(filePath);
 
-    const totalPages = order.totalPages || 1;
-    const printDurationMs = 5000 + (totalPages * 5000);
-    console.log(`[${blockLocation}] Simulating physical print time: sleeping for ${printDurationMs}ms before completing order...`);
-    await delay(printDurationMs);
+    // Print job pushed directly to OS spooler; mark order completed
+    await delay(1000);
 
     await axios.post(
         `${backendUrl}/api/queue/complete`,
@@ -216,10 +214,6 @@ console.log("====================================================");
 // 1. Initial check on startup
 pollQueue();
 
-// 2. Connect to real-time event push stream (Zero Idle Requests)
+// 2. Connect to real-time event push stream (Zero Idle Requests / Event-Driven)
 connectSSE();
-
-// 3. Relaxed safety backup heartbeat (e.g. 60 seconds fallback instead of rapid polling)
-const fallbackIntervalMs = Math.max(pollIntervalMs, 60000);
-setInterval(pollQueue, fallbackIntervalMs);
 

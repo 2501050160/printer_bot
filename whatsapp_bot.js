@@ -31,6 +31,7 @@ const FormData = require('form-data');
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
 const BACKEND_BASE = process.env.BACKEND_BASE_URL || 'https://printer-backend-kgzp.onrender.com';
+const FRONTEND_BASE = process.env.FRONTEND_URL || 'https://cloudprint.website';
 const SESSIONS_FILE = path.join(__dirname, 'user_sessions.json');
 const AUTH_DIR = path.join(__dirname, '.baileys_auth');
 
@@ -60,17 +61,17 @@ let lastCollegesFetchTime = 0;
 
 async function getCollegesAndBlocks() {
     const now = Date.now();
-    // Cache for 60 seconds so online printer availability is fresh but fast
-    if (cachedCollegesMap && (now - lastCollegesFetchTime < 60 * 1000)) {
+    // Cache for 30 seconds so online printer availability is fresh and responsive
+    if (cachedCollegesMap && (now - lastCollegesFetchTime < 30 * 1000)) {
         return cachedCollegesMap;
     }
 
     try {
-        const res = await axios.get(`${BACKEND_BASE}/api/blocks/online`, { timeout: 20000 });
+        const res = await axios.get(`${BACKEND_BASE}/api/blocks/online`, { timeout: 15000 });
         if (res.data && Array.isArray(res.data) && res.data.length > 0) {
             const map = {};
             res.data.forEach(item => {
-                const col = item.college || 'Default Campus';
+                const col = item.college || 'Campus';
                 if (!map[col]) map[col] = [];
                 if (item.name && !map[col].includes(item.name)) {
                     map[col].push(item.name);
@@ -81,14 +82,13 @@ async function getCollegesAndBlocks() {
             return map;
         }
     } catch (e) {
-        console.error('Online blocks lookup notice (using cache/default):', e.message);
+        console.error('Online blocks lookup notice (using cache):', e.message);
     }
 
     if (cachedCollegesMap) return cachedCollegesMap;
 
     return {
-        "KLU": ["C Block", "R Block", "L Block"],
-        "Lakshmi Narayana Xerox": ["Black and White", "Colour"]
+        "KLU": ["C Block"]
     };
 }
 
@@ -99,13 +99,26 @@ async function checkKioskPrinterStatus(blockLocation, printType = 'BW') {
         if (res.data) {
             return {
                 available: Boolean(res.data.available),
-                message: res.data.message || 'Printer is available'
+                message: res.data.message || (res.data.available ? 'Printer is available' : 'The printer at this block is currently offline or unassigned.')
             };
         }
     } catch (e) {
-        console.error(`Printer status check error for ${blockLocation}:`, e.message);
+        console.error(`Printer status check notice for ${blockLocation}:`, e.message);
     }
-    return { available: true, message: 'OK' };
+
+    try {
+        const sysRes = await axios.get(`${BACKEND_BASE}/api/system/status?blockLocation=${encodeURIComponent(blockLocation)}`, { timeout: 10000 });
+        if (sysRes.data) {
+            const isOnline = Boolean(sysRes.data.available && sysRes.data.printerConfigured);
+            return {
+                available: isOnline,
+                message: isOnline ? 'Printer is available' : 'The printer at this kiosk block is currently offline or under maintenance.'
+            };
+        }
+    } catch (sysErr) {
+        console.error(`System status check error for ${blockLocation}:`, sysErr.message);
+    }
+    return { available: false, message: `Could not connect to the print server for ${blockLocation}. Please select another active kiosk.` };
 }
 
 function getPDFPageCount(buffer) {
@@ -219,14 +232,15 @@ function getFriendlyChatResponse(textLower, rawText, senderName, session) {
     if (/^(hi|hello|hilo|hey|heya|hola|good morning|good afternoon|good evening|namaste|sup|what's up|greetings)/i.test(textLower)) {
         return `👋 *Hello ${senderName}!* 😊\n\n` +
                `I'm your **Cloud Print Assistant**! I'm here to support you and manage your print jobs smoothly.\n\n` +
-               `📍 *Active Kiosk*: *${session.blockLocation || 'Campus Kiosk'}* (${session.college || 'College'})\n\n` +
-               `💡 *To print*: Simply attach and send any **PDF document or Image** right here in chat!\n` +
-               `💡 *Ask me*: You can ask about *prices*, *kiosk location*, or *how it works*! 😊`;
+               `📍 *Active Online Kiosk*: *${session.blockLocation || 'C Block'}* (🟢 Online & Active 🖨️)\n` +
+               `🏫 *Campus*: *${session.college || 'KLU'}*\n\n` +
+               `📎 *To Print*: Simply attach and send any **PDF document or Image** right here in chat!\n` +
+               `💡 Reply *"block"* anytime to switch your kiosk or check online printer status.`;
     }
 
     // 5. Friendly "How are you"
     if (/how are you|how do you do|hru|how's it going/i.test(textLower)) {
-        return `😊 *I'm doing awesome, thank you for asking, ${senderName}!* 🌟\n\nReady to help you print your documents fast and hassle-free. Just send your file whenever you're ready! 🖨️✨`;
+        return `😊 *I'm doing awesome, thank you for asking, ${senderName}!* 🌟\n\nReady to help you print your documents fast and hassle-free at *${session.blockLocation || 'C Block'}* (🟢 Online). Just send your file whenever you're ready! 🖨️✨`;
     }
 
     // 6. Pricing & Rates
@@ -245,7 +259,7 @@ function getFriendlyChatResponse(textLower, rawText, senderName, session) {
                `-----------------------------------\n` +
                `1️⃣ *Send File*: Attach your PDF or Image in this WhatsApp chat.\n` +
                `2️⃣ *Select Settings*: Choose pages & color mode, then pay online.\n` +
-               `3️⃣ *Collect Print*: Go to your kiosk screen (*${session.blockLocation || 'Campus Kiosk'}*), view your 4-digit Release OTP, and collect your paper!\n\n` +
+               `3️⃣ *Collect Print*: Go to your kiosk screen (*${session.blockLocation || 'C Block'}*), view your 4-digit Release OTP on the display, and collect your paper!\n\n` +
                `It's super simple! Just send your file to begin. 😊`;
     }
 
@@ -259,8 +273,8 @@ function getFriendlyChatResponse(textLower, rawText, senderName, session) {
         return `📍 *Kiosk Info* 😊\n` +
                `-----------------------------------\n` +
                `• 🏫 *College/Shop*: *${session.college || 'Selected Campus'}*\n` +
-               `• 🖨️ *Active Kiosk*: *${session.blockLocation || 'Selected Kiosk'}*\n\n` +
-               `Your documents will be printed at this location! 🚀`;
+               `• 🖨️ *Active Kiosk*: *${session.blockLocation || 'Selected Kiosk'}* (🟢 Online)\n\n` +
+               `Your documents will be printed at this location! 🚀 Reply *"block"* to switch anytime.`;
     }
 
     // 10. Bot Identity / Who are you
@@ -271,36 +285,44 @@ function getFriendlyChatResponse(textLower, rawText, senderName, session) {
     // Default Conversational Fallback
     return `👋 *Hi ${senderName}!* 😊\n\n` +
            `I'm here to help with your campus document printing.\n\n` +
-           `📍 *Current Kiosk*: *${session.blockLocation || 'Campus Kiosk'}* (${session.college || 'Campus'})\n\n` +
+           `📍 *Active Online Kiosk*: *${session.blockLocation || 'C Block'}* (🟢 Online & Ready 🖨️)\n` +
+           `🏫 *Campus*: *${session.college || 'KLU'}*\n\n` +
            `📎 *To Print*: Simply attach and send any **PDF document or Image** right here!\n` +
-           `💡 You can ask me for *"prices"*, *"kiosk location"*, or *"help"* anytime! ✨`;
+           `💡 Reply *"block"* anytime to check online printers or switch kiosk! ✨`;
 }
 
 async function generateRefundCoupon(paidAmount) {
+    const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const amountVal = typeof paidAmount === 'number' ? paidAmount : (parseFloat(paidAmount) || 2.0);
     try {
-        const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
-        const expiry = new Date();
-        expiry.setDate(expiry.getDate() + 7);
-        const expiryStr = expiry.toISOString().split('T')[0];
-
-        const payload = {
-            couponCode: randomCode,
-            discountAmount: typeof paidAmount === 'number' ? paidAmount : (parseFloat(paidAmount) || 4.0),
-            discountPercentage: 0.0,
-            expiryDate: expiryStr,
-            maxUses: 1,
-            usedCount: 0,
-            active: true
-        };
-
-        const res = await axios.post(`${BACKEND_BASE}/api/coupon/create`, payload, { timeout: 5000 });
+        const res = await axios.post(`${BACKEND_BASE}/api/coupon/refund?amount=${amountVal}&code=${randomCode}`, null, { timeout: 15000 });
         if (res.data && res.data.couponCode) {
             return res.data.couponCode;
         }
         return randomCode;
     } catch (e) {
-        console.error("Failed to create refund coupon in backend:", e.message);
-        return Math.floor(100000 + Math.random() * 900000).toString();
+        console.error("Failed to create refund coupon via /refund endpoint:", e.message);
+        try {
+            const expiry = new Date();
+            expiry.setDate(expiry.getDate() + 7);
+            const expiryStr = expiry.toISOString().split('T')[0];
+            const payload = {
+                couponCode: randomCode,
+                discountAmount: amountVal,
+                discountPercentage: 0.0,
+                expiryDate: expiryStr,
+                maxUses: 1,
+                usedCount: 0,
+                active: true
+            };
+            const res2 = await axios.post(`${BACKEND_BASE}/api/coupon/create`, payload, { timeout: 15000 });
+            if (res2.data && res2.data.couponCode) {
+                return res2.data.couponCode;
+            }
+        } catch (e2) {
+            console.error("Failed to create refund coupon via /create endpoint:", e2.message);
+        }
+        return randomCode;
     }
 }
 
@@ -688,35 +710,10 @@ async function handleIncomingMessage(msg) {
                         return;
                     }
                 } catch (otpErr) {
-                    const wasPaid = Boolean(session.paymentNotified);
-                    if (wasPaid) {
-                        const refundVal = session.lastPrice || 4.0;
-                        const couponCode = await generateRefundCoupon(refundVal);
-
-                        const couponMsg = `⚠️ *Invalid OTP (${rawText}) for Order ${activeOrderToRelease}!*\n\n` +
-                                          `🎟️ *PRINT REFUND COUPON GENERATED*:\n` +
-                                          `-----------------------------------------\n` +
-                                          `💰 *Refund Value*: *₹${refundVal.toFixed(2)}*\n` +
-                                          `🏷️ *Coupon Code*: *${couponCode}*\n` +
-                                          `⏰ *Validity*: *7 Days* (Single Use Only)\n` +
-                                          `-----------------------------------------\n` +
-                                          `💡 Anyone can use coupon code *${couponCode}* on their next print order checkout to deduct ₹${refundVal.toFixed(2)}!\n\n` +
-                                          `Order ${activeOrderToRelease} has been cancelled. You can attach a new file to print anytime.`;
-
-                        await sock.sendMessage(jid, { text: couponMsg });
-                        session.lastOrderId = null;
-                        session.lastOtp = null;
-                        session.paymentNotified = false;
-                        session.pending = null;
-                        session.step = 'IDLE';
-                        saveSessions(sessions);
-                        return;
-                    } else {
-                        await sock.sendMessage(jid, {
-                            text: `⚠️ *Invalid OTP (${rawText})* for Order *${activeOrderToRelease}*.\n\nPlease double check your 4-digit release code and try again, or reply *cancel* to cancel this order.`
-                        });
-                        return;
-                    }
+                    await sock.sendMessage(jid, {
+                        text: `📺 *Kiosk Screen Keypad*: Please enter your 4-digit Release OTP directly on the kiosk display keypad at *${session.blockLocation || 'C Block'}* to collect your print!`
+                    });
+                    return;
                 }
             }
         }
@@ -915,6 +912,17 @@ async function handleIncomingMessage(msg) {
         const imgMsg = messageContent?.imageMessage;
 
         if (docMsg || imgMsg) {
+            // Verify user is not blocked
+            try {
+                const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 4000 });
+                if (balRes.data && balRes.data.blocked) {
+                    await sock.sendMessage(jid, {
+                        text: "⛔ *Account Suspended Alert*:\n\nYour WhatsApp number has been suspended by the campus administrator. Printing and order creation services are blocked for this number.\n\nPlease contact campus admin to unblock your account."
+                    });
+                    return;
+                }
+            } catch (ignored) {}
+
             // Verify that the target kiosk printer is currently online before accepting document
             if (session.blockLocation) {
                 const printerCheck = await checkKioskPrinterStatus(session.blockLocation, 'BW');
@@ -962,17 +970,27 @@ async function handleIncomingMessage(msg) {
             }
 
             const mimetype = docMsg?.mimetype || imgMsg?.mimetype || 'application/pdf';
-            const isImage = Boolean(imgMsg || mimetype.startsWith('image/'));
-            let filename = docMsg?.fileName || rawText;
+            let filename = docMsg?.fileName || (imgMsg ? 'photo.jpg' : rawText);
             if (!filename || filename.trim().length === 0) {
-                filename = isImage ? 'image.jpg' : (mimetype.includes('pdf') ? 'document.pdf' : 'file');
+                filename = imgMsg ? 'photo.jpg' : (mimetype.includes('pdf') ? 'document.pdf' : 'file');
             }
+            const lowerName = (filename || '').toLowerCase();
+            const isImage = Boolean(
+                imgMsg ||
+                (mimetype && mimetype.startsWith('image/')) ||
+                lowerName.endsWith('.jpg') ||
+                lowerName.endsWith('.jpeg') ||
+                lowerName.endsWith('.png') ||
+                lowerName.endsWith('.webp') ||
+                lowerName.endsWith('.heic') ||
+                lowerName.endsWith('.bmp')
+            );
 
             const totalPages = (mimetype.includes('pdf') && !isImage) ? getPDFPageCount(buffer) : 1;
 
             session.pending = {
                 filename,
-                mimetype,
+                mimetype: isImage ? (mimetype.startsWith('image/') ? mimetype : 'image/jpeg') : mimetype,
                 isImage,
                 bufferBase64: buffer.toString('base64'),
                 totalPages,
@@ -984,17 +1002,32 @@ async function handleIncomingMessage(msg) {
             session.step = 'SELECT_PRINT_MODE';
             saveSessions(sessions);
 
-            await sendSmartMenu(
-                sock,
-                jid,
-                `📄 Document Received: ${filename}`,
-                `📊 Total Pages Detected: *${totalPages}*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print?`,
-                'Select Print Mode',
-                [
-                    '⚡ Quick Print (All Pages, Single Sided, B&W)',
-                    '⚙️ Customize Print Settings'
-                ]
-            );
+            if (isImage) {
+                await sendSmartMenu(
+                    sock,
+                    jid,
+                    `🖼️ Photo Received: ${filename}`,
+                    `📷 *Photo / Image (1 Page)*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print this photo?`,
+                    'Select Print Option',
+                    [
+                        '⚡ Quick Print (B&W • 1 Copy • ₹2)',
+                        '🎨 Print in Color (₹5)',
+                        '⚙️ Customize Color & Copies'
+                    ]
+                );
+            } else {
+                await sendSmartMenu(
+                    sock,
+                    jid,
+                    `📄 Document Received: ${filename}`,
+                    `📊 Total Pages Detected: *${totalPages}*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print?`,
+                    'Select Print Mode',
+                    [
+                        '⚡ Quick Print (All Pages, Single Sided, B&W)',
+                        '⚙️ Customize Print Settings'
+                    ]
+                );
+            }
             return;
         }
 
@@ -1002,31 +1035,269 @@ async function handleIncomingMessage(msg) {
         if (session.pending) {
 
             if (session.step === 'SELECT_PRINT_MODE') {
+                const printerCheck = await checkKioskPrinterStatus(session.blockLocation, 'BW');
+                if (!printerCheck.available) {
+                    session.pending = null;
+                    session.step = 'SELECT_BLOCK';
+                    saveSessions(sessions);
+                    await sock.sendMessage(jid, {
+                        text: `⚠️ *Kiosk Offline Alert*:\nYour selected kiosk (*${session.blockLocation}*) is currently offline, unassigned, or under maintenance.\n\n🚫 *Orders cannot be placed for this block at this moment.*\n\nPlease choose an active online kiosk below to proceed with your print:`
+                    });
+                    const collegesMap = await getCollegesAndBlocks();
+                    const blocks = collegesMap[session.college] || [];
+                    if (blocks.length > 0) {
+                        await sendSmartMenu(
+                            sock,
+                            jid,
+                            `🟢 Available Online Kiosks (${session.college || 'Campus'})`,
+                            'Please select an active online kiosk below:',
+                            'Select Kiosk Block',
+                            blocks.map(b => `🟢 📍 ${b}`)
+                        );
+                    }
+                    return;
+                }
+
                 if (textLower.includes('quick') || textLower === '1') {
                     session.pending.selectedPages = 'ALL';
                     session.pending.doubleSided = false;
                     session.pending.printType = 'BW';
                     session.pending.copies = 1;
-                    await showOrderSummary(sock, jid, session, sessions);
-                    return;
-                } else if (textLower.includes('custom') || textLower === '2') {
-                    if (session.pending.isImage) {
-                        // Images have no page range or duplex mode: skip directly to Color selection
-                        session.pending.selectedPages = 'ALL';
-                        session.pending.doubleSided = false;
-                        session.step = 'SELECT_COLOR';
-                        saveSessions(sessions);
 
-                        await sendSmartMenu(
-                            sock,
-                            jid,
-                            '🎨 Select Print Color Mode',
-                            'Please choose your print color mode below:',
-                            'Select Color Mode',
-                            ['⚫ Black & White (₹2/pg)', '🎨 Color (₹5/pg)']
-                        );
+                    const pageCount = countPagesFromRange('ALL', session.pending.totalPages);
+                    const rate = 2.0;
+                    const estimatedTotal = pageCount * rate;
+                    session.pending.estimatedTotal = estimatedTotal;
+
+                    let userBalance = 0.0;
+                    try {
+                        const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 4000 });
+                        if (balRes.data && balRes.data.balance !== undefined) {
+                            userBalance = parseFloat(balRes.data.balance) || 0.0;
+                        }
+                    } catch (e) {}
+
+                    const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
+                        `📄 File: *${session.pending.filename}*\n` +
+                        `📊 Pages: *${pageCount}* (Range: ALL)\n` +
+                        `📑 Sides: *Single Sided*\n` +
+                        `🎨 Mode: *Black & White (₹2/pg)*\n` +
+                        `🔢 Copies: *1*\n` +
+                        `📍 Kiosk: *${session.blockLocation}* (${session.college})\n` +
+                        `💰 Total Amount: *₹${estimatedTotal.toFixed(2)}*\n` +
+                        `💳 Wallet Balance: *₹${userBalance.toFixed(2)}*`;
+
+                    await sock.sendMessage(jid, { text: summaryText });
+
+                    // 1. If user has enough wallet balance, pay via wallet instantly
+                    if (userBalance >= estimatedTotal && estimatedTotal > 0) {
+                        await sock.sendMessage(jid, { text: "⏳ *Processing instant 1-Tap Wallet Payment...*" });
+                        try {
+                            const remoteForm = createUploadFormData(session, senderName, senderPhone);
+                            const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
+                            const response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
+                            const resData = response.data || {};
+                            const orderId = resData.orderId || 'ORD2026';
+
+                            const walletRes = await axios.post(`${BACKEND_BASE}/api/bot/pay-via-wallet?orderId=${orderId}&phoneNumber=${senderPhone}`, null, { timeout: 30000 });
+                            const wData = walletRes.data || {};
+                            if (wData.success) {
+                                const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
+                                const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+
+                                const paidMsg = `✅ *Payment Successful via Wallet Balance!* 🎉\n` +
+                                                `-----------------------------------\n` +
+                                                `💰 *Amount Paid*: *₹${estimatedTotal.toFixed(2)}*\n` +
+                                                `💳 *Remaining Wallet Balance*: *₹${(wData.newBalance || 0.0).toFixed(2)}*\n` +
+                                                `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                                                `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
+                                                `📺 *Please check your 4-digit Release OTP on the ${session.blockLocation || 'Campus Kiosk'} kiosk display screen* and enter it on the keypad before *${expiryTimeStr}* to print!`;
+
+                                await sock.sendMessage(jid, { text: paidMsg });
+
+                                session.lastOrderId = orderId;
+                                session.lastPrice = estimatedTotal;
+                                session.otpReleased = false;
+                                session.paymentNotified = true;
+                                session.paidTimestamp = Date.now();
+                                session.lastReminderTimestamp = Date.now();
+                                session.pending = null;
+                                session.step = 'IDLE';
+                                saveSessions(sessions);
+                                return;
+                            }
+                        } catch (wErr) {
+                            console.error("Quick Print wallet payment error:", wErr.message);
+                        }
+                    }
+
+                    // 2. Otherwise generate and send direct Razorpay Payment Link right away
+                    await sock.sendMessage(jid, { text: "⏳ *Generating online payment link...*" });
+                    try {
+                        const remoteForm = createUploadFormData(session, senderName, senderPhone);
+                        const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
+                        const response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
+                        const resData = response.data || {};
+                        const orderId = resData.orderId || 'ORD2026';
+                        const paymentUrl = resData.paymentUrl || `${FRONTEND_BASE}/pay?orderId=${orderId}`;
+
+                        const payMsg = `💳 *Pay Online via Razorpay*:\n${paymentUrl}\n\n` +
+                                     `⏳ *Payment Window*: *3 Minutes* (Order automatically cancels if unpaid within 3 minutes)\n\n` +
+                                     `Tap the link above to complete your UPI/Card payment! Once paid, your order will be sent to the kiosk display queue.`;
+                        await sock.sendMessage(jid, { text: payMsg });
+
+                        session.lastOrderId = orderId;
+                        session.lastPrice = estimatedTotal;
+                        session.otpReleased = false;
+                        session.paymentNotified = false;
+                        session.notifiedCompletion = false;
+                        session.notifiedCancelled = false;
+                        session.orderCreatedTimestamp = Date.now();
+                        session.paidTimestamp = null;
+                        session.lastReminderTimestamp = 0;
+                        session.pending = null;
+                        session.step = 'IDLE';
+                        saveSessions(sessions);
                         return;
-                    } else if (session.pending.totalPages === 1) {
+                    } catch (remoteErr) {
+                        console.error("Quick Print order creation failed:", remoteErr.message);
+                        session.pending = null;
+                        session.step = 'IDLE';
+                        saveSessions(sessions);
+                        await sock.sendMessage(jid, { text: "❌ *Transaction Failed*: Could not generate payment link right now. Please try again later." });
+                        return;
+                    }
+                } else if (session.pending.isImage && (textLower.includes('color') || textLower.includes('colour') || textLower === '2')) {
+                    const colorCheck = await checkKioskPrinterStatus(session.blockLocation, 'COLOR');
+                    if (!colorCheck.available) {
+                        await sock.sendMessage(jid, {
+                            text: `⚠️ *Color Printing Unavailable*:\n${colorCheck.message}\n\nPlease choose *1* for Black & White (₹2), or select a different option:`
+                        });
+                        return;
+                    }
+                    session.pending.selectedPages = 'ALL';
+                    session.pending.doubleSided = false;
+                    session.pending.printType = 'COLOR';
+                    session.pending.copies = 1;
+
+                    const estimatedTotal = 5.0;
+                    session.pending.estimatedTotal = estimatedTotal;
+
+                    let userBalance = 0.0;
+                    try {
+                        const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 4000 });
+                        if (balRes.data && balRes.data.balance !== undefined) {
+                            userBalance = parseFloat(balRes.data.balance) || 0.0;
+                        }
+                    } catch (e) {}
+
+                    const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
+                        `📄 File: *${session.pending.filename}*\n` +
+                        `🖼️ Type: *Photo / Image (1 Page)*\n` +
+                        `🎨 Mode: *Color (₹5.00)*\n` +
+                        `🔢 Copies: *1*\n` +
+                        `📍 Kiosk: *${session.blockLocation}* (${session.college})\n` +
+                        `💰 Total Amount: *₹${estimatedTotal.toFixed(2)}*\n` +
+                        `💳 Wallet Balance: *₹${userBalance.toFixed(2)}*`;
+
+                    await sock.sendMessage(jid, { text: summaryText });
+
+                    // 1. Wallet payment
+                    if (userBalance >= estimatedTotal && estimatedTotal > 0) {
+                        await sock.sendMessage(jid, { text: "⏳ *Processing instant 1-Tap Wallet Payment...*" });
+                        try {
+                            const remoteForm = createUploadFormData(session, senderName, senderPhone);
+                            const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
+                            const response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
+                            const resData = response.data || {};
+                            const orderId = resData.orderId || 'ORD2026';
+
+                            const walletRes = await axios.post(`${BACKEND_BASE}/api/bot/pay-via-wallet?orderId=${orderId}&phoneNumber=${senderPhone}`, null, { timeout: 30000 });
+                            const wData = walletRes.data || {};
+                            if (wData.success) {
+                                const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
+                                const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+
+                                const paidMsg = `✅ *Payment Successful via Wallet Balance!* 🎉\n` +
+                                                `-----------------------------------\n` +
+                                                `💰 *Amount Paid*: *₹${estimatedTotal.toFixed(2)}*\n` +
+                                                `💳 *Remaining Wallet Balance*: *₹${(wData.newBalance || 0.0).toFixed(2)}*\n` +
+                                                `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                                                `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
+                                                `📺 *Please check your 4-digit Release OTP on the ${session.blockLocation || 'Campus Kiosk'} kiosk display screen* and enter it on the keypad before *${expiryTimeStr}* to print!`;
+
+                                await sock.sendMessage(jid, { text: paidMsg });
+
+                                session.lastOrderId = orderId;
+                                session.lastPrice = estimatedTotal;
+                                session.otpReleased = false;
+                                session.paymentNotified = true;
+                                session.paidTimestamp = Date.now();
+                                session.lastReminderTimestamp = Date.now();
+                                session.pending = null;
+                                session.step = 'IDLE';
+                                saveSessions(sessions);
+                                return;
+                            }
+                        } catch (wErr) {
+                            console.error("Quick Color wallet payment error:", wErr.message);
+                        }
+                    }
+
+                    // 2. Razorpay payment link
+                    await sock.sendMessage(jid, { text: "⏳ *Generating online payment link...*" });
+                    try {
+                        const remoteForm = createUploadFormData(session, senderName, senderPhone);
+                        const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
+                        const response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
+                        const resData = response.data || {};
+                        const orderId = resData.orderId || 'ORD2026';
+                        const paymentUrl = resData.paymentUrl || `${FRONTEND_BASE}/pay?orderId=${orderId}`;
+
+                        const payMsg = `💳 *Pay Online via Razorpay*:\n${paymentUrl}\n\n` +
+                                     `⏳ *Payment Window*: *3 Minutes* (Order automatically cancels if unpaid within 3 minutes)\n\n` +
+                                     `Tap the link above to complete your UPI/Card payment! Once paid, your order will be sent to the kiosk display queue.`;
+                        await sock.sendMessage(jid, { text: payMsg });
+
+                        session.lastOrderId = orderId;
+                        session.lastPrice = estimatedTotal;
+                        session.otpReleased = false;
+                        session.paymentNotified = false;
+                        session.notifiedCompletion = false;
+                        session.notifiedCancelled = false;
+                        session.orderCreatedTimestamp = Date.now();
+                        session.paidTimestamp = null;
+                        session.lastReminderTimestamp = 0;
+                        session.pending = null;
+                        session.step = 'IDLE';
+                        saveSessions(sessions);
+                        return;
+                    } catch (remoteErr) {
+                        console.error("Quick Color order creation failed:", remoteErr.message);
+                        session.pending = null;
+                        session.step = 'IDLE';
+                        saveSessions(sessions);
+                        await sock.sendMessage(jid, { text: "❌ *Transaction Failed*: Could not generate payment link right now. Please try again later." });
+                        return;
+                    }
+                } else if (session.pending.isImage && (textLower.includes('custom') || textLower.includes('cop') || textLower === '3')) {
+                    // Images have no page range or duplex mode: skip directly to Color selection
+                    session.pending.selectedPages = 'ALL';
+                    session.pending.doubleSided = false;
+                    session.step = 'SELECT_COLOR';
+                    saveSessions(sessions);
+
+                    await sendSmartMenu(
+                        sock,
+                        jid,
+                        '🎨 Select Print Color Mode',
+                        'Please choose your print color mode below:',
+                        'Select Color Mode',
+                        ['⚫ Black & White (₹2/pg)', '🎨 Color (₹5/pg)']
+                    );
+                    return;
+                } else if (!session.pending.isImage && (textLower.includes('custom') || textLower === '2')) {
+                    if (session.pending.totalPages === 1) {
                         // 1-page PDF has no custom page range: skip to Print Sides selection
                         session.pending.selectedPages = 'ALL';
                         session.step = 'SELECT_SIDES';
@@ -1056,7 +1327,11 @@ async function handleIncomingMessage(msg) {
                         return;
                     }
                 } else {
-                    await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with *1* for Quick Print or *2* for Customize Print Settings.` });
+                    if (session.pending.isImage) {
+                        await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with:\n• *1* for Quick B&W Print (₹2)\n• *2* for Quick Color Print (₹5)\n• *3* to Customize Color & Copies` });
+                    } else {
+                        await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with *1* for Quick Print or *2* for Customize Print Settings.` });
+                    }
                     return;
                 }
             }
@@ -1187,6 +1462,29 @@ async function handleIncomingMessage(msg) {
             }
 
             if (session.step === 'CONFIRM_ORDER') {
+                const printerCheck = await checkKioskPrinterStatus(session.blockLocation, session.pending?.printType || 'BW');
+                if (!printerCheck.available) {
+                    session.pending = null;
+                    session.step = 'SELECT_BLOCK';
+                    saveSessions(sessions);
+                    await sock.sendMessage(jid, {
+                        text: `⚠️ *Kiosk Offline Alert*:\nYour selected kiosk (*${session.blockLocation}*) is currently offline, unassigned, or under maintenance.\n\n🚫 *Order cannot be placed for this block at this moment.*\n\nPlease choose an active online kiosk below to proceed with your print:`
+                    });
+                    const collegesMap = await getCollegesAndBlocks();
+                    const blocks = collegesMap[session.college] || [];
+                    if (blocks.length > 0) {
+                        await sendSmartMenu(
+                            sock,
+                            jid,
+                            `🟢 Available Online Kiosks (${session.college || 'Campus'})`,
+                            'Please select an active online kiosk below:',
+                            'Select Kiosk Block',
+                            blocks.map(b => `🟢 📍 ${b}`)
+                        );
+                    }
+                    return;
+                }
+
                 const userBal = session.pending?.userBalance || 0.0;
                 const totalAmt = session.pending?.estimatedTotal || 0.0;
                 const hasEnoughWallet = userBal >= totalAmt;
@@ -1231,13 +1529,16 @@ async function handleIncomingMessage(msg) {
                         const walletRes = await axios.post(`${BACKEND_BASE}/api/bot/pay-via-wallet?orderId=${orderId}&phoneNumber=${senderPhone}`, null, { timeout: 30000 });
                         const wData = walletRes.data || {};
                         if (wData.success) {
+                            const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
+                            const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+
                             const paidMsg = `✅ *Payment Successful via Wallet Balance!* 🎉\n` +
                                             `-----------------------------------\n` +
                                             `💰 *Amount Paid*: *₹${totalAmt.toFixed(2)}*\n` +
                                             `💳 *Remaining Wallet Balance*: *₹${(wData.newBalance || 0.0).toFixed(2)}*\n` +
-                                            `🔐 *Your 4-Digit Release OTP*: *${wData.otp || '1000'}*\n` +
-                                            `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n\n` +
-                                            `🏃‍♂️ *Please go to your kiosk screen (${session.blockLocation || 'Campus Kiosk'})* and enter your 4-digit OTP on the display keypad to collect your paper!`;
+                                            `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                                            `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
+                                            `📺 *Please check your 4-digit Release OTP on the ${session.blockLocation || 'Campus Kiosk'} kiosk display screen* and enter it on the display keypad before *${expiryTimeStr}* to collect your paper!`;
 
                             await sock.sendMessage(jid, { text: paidMsg });
 
@@ -1290,9 +1591,11 @@ async function handleIncomingMessage(msg) {
 
                     const resData = response.data || {};
                     const orderId = resData.orderId || 'ORD2026';
-                    const paymentUrl = resData.paymentUrl || `${BACKEND_BASE}/checkout?orderId=${orderId}`;
+                    const paymentUrl = resData.paymentUrl || `${FRONTEND_BASE}/pay?orderId=${orderId}`;
 
-                    let payMsg = `💳 *Pay Online via Razorpay*:\n${paymentUrl}\n\nTap link above to complete payment online! Once your payment is confirmed, please check your 4-digit Release OTP on the kiosk display screen to print.`;
+                    let payMsg = `💳 *Pay Online via Razorpay*:\n${paymentUrl}\n\n` +
+                                 `⏳ *Payment Window*: *3 Minutes* (Order automatically cancels if unpaid within 3 minutes)\n\n` +
+                                 `Tap link above to complete payment online! Once your payment is confirmed, your 4-digit Release OTP and countdown will be sent here immediately.`;
                     await sock.sendMessage(jid, { text: payMsg });
 
                     session.lastOrderId = orderId;
@@ -1301,6 +1604,7 @@ async function handleIncomingMessage(msg) {
                     session.paymentNotified = false;
                     session.notifiedCompletion = false;
                     session.notifiedCancelled = false;
+                    session.orderCreatedTimestamp = Date.now();
                     session.paidTimestamp = null;
                     session.lastReminderTimestamp = 0;
                     session.pending = null;
@@ -1330,11 +1634,12 @@ async function handleIncomingMessage(msg) {
 }
 
 async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
-    const pageCount = countPagesFromRange(session.pending.selectedPages, session.pending.totalPages);
+    const isImage = Boolean(session.pending.isImage);
+    const pageCount = isImage ? 1 : countPagesFromRange(session.pending.selectedPages, session.pending.totalPages);
     const rate = session.pending.printType === 'COLOR' ? 5.0 : (session.pending.doubleSided ? 2.0 : 2.0);
     const div = session.pending.doubleSided ? 2.0 : 1.0;
     const paperSheets = Math.ceil(pageCount / div);
-    const estimatedTotal = paperSheets * session.pending.copies * rate;
+    const estimatedTotal = paperSheets * (session.pending.copies || 1) * rate;
 
     session.pending.estimatedTotal = estimatedTotal;
 
@@ -1362,11 +1667,12 @@ async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
             '❌ Cancel Order'
           ];
 
-    const summaryText = `📄 File: *${session.pending.filename}*\n` +
-        `📊 Pages: *${pageCount}* (Range: ${session.pending.selectedPages})\n` +
-        `📑 Sides: *${session.pending.doubleSided ? 'Both Sides (Duplex)' : 'Single Sided'}*\n` +
+    const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
+        `📄 File: *${session.pending.filename}*\n` +
+        (isImage ? `🖼️ Type: *Photo / Image (1 Page)*\n` : `📊 Pages: *${pageCount}* (Range: ${session.pending.selectedPages})\n`) +
+        (isImage ? `` : `📑 Sides: *${session.pending.doubleSided ? 'Both Sides (Duplex)' : 'Single Sided'}*\n`) +
         `🎨 Mode: *${session.pending.printType === 'COLOR' ? 'Color (₹5/pg)' : 'Black & White (₹2/pg)'}*\n` +
-        `🔢 Copies: *${session.pending.copies}*\n` +
+        `🔢 Copies: *${session.pending.copies || 1}*\n` +
         `📍 Kiosk: *${session.blockLocation}* (${session.college})\n` +
         `💰 Total Amount: *₹${estimatedTotal.toFixed(2)}*\n` +
         `💳 Wallet Balance: *₹${userBalance.toFixed(2)}*`;
@@ -1382,7 +1688,7 @@ async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
 }
 
 function startOrderMonitoring() {
-    // Check orders on-demand every 30s only for active sessions to conserve Render bandwidth
+    // Check orders on-demand every 15s only for active sessions to conserve Render bandwidth
     setInterval(async () => {
         try {
             const sessions = loadSessions();
@@ -1394,15 +1700,45 @@ function startOrderMonitoring() {
                 // Only monitor if session has an active, unnotified or pending order
                 if (session.lastOrderId && sock && !session.notifiedCompletion) {
                     try {
-                        const res = await axios.get(`${BACKEND_BASE}/api/pdf/details?orderId=${session.lastOrderId}`, { timeout: 5000 });
-                        const data = res.data || {};
                         const targetJid = session.jid || `${phone}@s.whatsapp.net`;
 
-                        // 1. Post-Payment Confirmation Notice
+                        // 0. Auto-cancel Unpaid Orders after 3 Minutes (180,000 ms)
+                        if (!session.paymentNotified && session.orderCreatedTimestamp) {
+                            const unpaidElapsed = nowMs - session.orderCreatedTimestamp;
+                            if (unpaidElapsed >= 180000) { // 3 minutes
+                                try {
+                                    await axios.post(`${BACKEND_BASE}/api/pdf/cancel`, null, {
+                                        params: { orderId: session.lastOrderId }
+                                    }).catch(() => {});
+                                } catch (e) {}
+
+                                const timeoutMsg = `❌ *Order ${session.lastOrderId} Cancelled (Payment Timeout)*\n\n` +
+                                                   `Your print order was automatically cancelled because payment was not confirmed within 3 minutes.\n\n` +
+                                                   `📄 *Need to print?* Simply attach and send your document again to create a new order anytime!`;
+
+                                await sock.sendMessage(targetJid, { text: timeoutMsg });
+                                session.lastOrderId = null;
+                                session.lastOtp = null;
+                                session.pending = null;
+                                session.step = 'IDLE';
+                                session.orderCreatedTimestamp = null;
+                                updated = true;
+                                continue;
+                            }
+                        }
+
+                        const res = await axios.get(`${BACKEND_BASE}/api/pdf/details?orderId=${session.lastOrderId}`, { timeout: 5000 });
+                        const data = res.data || {};
+
+                        // 1. Post-Payment Confirmation Notice with Exact Expiry Time
                         if ((data.paymentStatus === 'PAID' || data.status === 'PAID' || data.status === 'CANCEL_WINDOW' || data.status === 'PENDING_SCAN') && !session.paymentNotified) {
-                            const msgText = `✅ *Payment Confirmed for Order ${session.lastOrderId}!*\n\n` +
-                                            `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n\n` +
-                                            `🏃‍♂️ *Please go to your designated kiosk display screen (${session.blockLocation || 'Campus Kiosk'})* to view your 4-digit Release OTP and enter it on the display keypad!`;
+                            const expiryDate = new Date(nowMs + 10 * 60 * 1000);
+                            const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+
+                            const msgText = `✅ *Payment Confirmed for Order ${session.lastOrderId}!* 🎉\n\n` +
+                                            `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                                            `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
+                                            `📺 *Please check your 4-digit Release OTP on the ${session.blockLocation || 'Campus Kiosk'} kiosk display screen* and enter it on the display keypad before *${expiryTimeStr}* to collect your paper!`;
 
                             await sock.sendMessage(targetJid, { text: msgText });
                             session.paymentNotified = true;
@@ -1461,19 +1797,22 @@ function startOrderMonitoring() {
                         }
 
                         // 4. Timeout Expiry / Cancellation Notification with 7-Day Refund Coupon
-                        if ((data.status === 'CANCELLED' || data.status === 'EXPIRED') && !session.notifiedCancelled) {
-                            const refundVal = data.price || session.lastPrice || 4.0;
-                            const couponCode = await generateRefundCoupon(typeof refundVal === 'number' ? refundVal : parseFloat(refundVal) || 4.0);
+                        if ((data.status === 'CANCELLED' || data.status === 'EXPIRED') && !session.notifiedCancelled && !session.notifiedCompletion && !session.otpReleased) {
+                            const refundVal = data.price || session.lastPrice || 2.0;
+                            const refundNum = typeof refundVal === 'number' ? refundVal : (parseFloat(refundVal) || 2.0);
+                            const couponCode = await generateRefundCoupon(refundNum);
 
                             const msgText = `⏰ *Order ${session.lastOrderId} Expired / Cancelled*\n\n` +
                                             `The release OTP was not entered within the time limit.\n\n` +
                                             `🎟️ *PRINT REFUND COUPON GENERATED*:\n` +
                                             `-----------------------------------------\n` +
-                                            `💰 *Refund Value*: *₹${(typeof refundVal === 'number' ? refundVal : parseFloat(refundVal) || 4.0).toFixed(2)}*\n` +
+                                            `💰 *Refund Value*: *₹${refundNum.toFixed(2)}*\n` +
                                             `🏷️ *Coupon Code*: *${couponCode}*\n` +
                                             `⏰ *Validity*: *7 Days* (Single Use Only)\n` +
                                             `-----------------------------------------\n` +
-                                            `💡 Anyone can enter coupon code *${couponCode}* on the checkout page of their next print order to deduct the amount!`;
+                                            `💡 *How to Redeem*:\n` +
+                                            `1. Reply *"${couponCode}"* or *"COUPON ${couponCode}"* right here on WhatsApp to add ₹${refundNum.toFixed(2)} to your wallet balance instantly!\n` +
+                                            `2. Or enter code *${couponCode}* on the checkout page of your next order.`;
 
                             await sock.sendMessage(targetJid, { text: msgText });
                             session.lastOrderId = null;

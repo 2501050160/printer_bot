@@ -329,85 +329,226 @@ async function generateRefundCoupon(paidAmount) {
 async function createReceiptPdf(orderData) {
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage([595.28, 841.89]);
-    const { height } = page.getSize();
+    const { width, height } = page.getSize();
     const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
     const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
-    // Header Banner
-    page.drawRectangle({
-        x: 0,
-        y: height - 120,
-        width: 595.28,
-        height: 120,
-        color: rgb(0.01, 0.52, 0.78),
-    });
+    const primaryColor = rgb(0.01, 0.52, 0.78); // Cyan / Blue branding
+    const darkTextColor = rgb(0.08, 0.12, 0.18);
+    const mutedTextColor = rgb(0.45, 0.52, 0.60);
+    const borderColor = rgb(0.88, 0.92, 0.96);
+    const greenColor = rgb(0.09, 0.63, 0.34);
 
-    page.drawText('CLOUD PRINT KIOSK', {
-        x: 40,
-        y: height - 50,
-        size: 24,
-        font: fontBold,
+    // 1. Outer Container Card Border
+    page.drawRectangle({
+        x: 35,
+        y: 35,
+        width: width - 70,
+        height: height - 70,
         color: rgb(1, 1, 1),
+        borderColor: borderColor,
+        borderWidth: 1.5,
     });
 
-    page.drawText('OFFICIAL PRINT RECEIPT', {
-        x: 40,
-        y: height - 80,
-        size: 14,
-        font: fontRegular,
-        color: rgb(0.85, 0.95, 1),
-    });
-
-    let y = height - 160;
-
-    const drawRow = (label, value) => {
-        page.drawText(label, { x: 50, y, size: 12, font: fontBold, color: rgb(0.2, 0.2, 0.2) });
-        page.drawText(String(value), { x: 220, y, size: 12, font: fontRegular, color: rgb(0.1, 0.1, 0.1) });
-        page.drawLine({
-            start: { x: 50, y: y - 8 },
-            end: { x: 545, y: y - 8 },
-            thickness: 0.5,
-            color: rgb(0.9, 0.9, 0.9),
-        });
-        y -= 35;
-    };
-
-    drawRow('Order ID:', orderData.orderId);
-    drawRow('Document Name:', orderData.fileName);
-    drawRow('Total Pages:', `${orderData.totalPages} Page(s)`);
-    drawRow('Print Format:', orderData.doubleSided ? 'Both Sides (Duplex)' : 'Single Sided');
-    drawRow('Color Mode:', orderData.printType === 'COLOR' ? 'Color' : 'Black & White');
-    drawRow('Number of Copies:', orderData.copies);
-    drawRow('Total Amount Paid:', `INR ${orderData.price.toFixed(2)}`);
-    drawRow('Payment Method:', 'Razorpay Online Payment');
-    drawRow('Collection Kiosk:', orderData.blockLocation);
-    drawRow('Completion Time:', new Date().toLocaleString());
-
-    // Footer Box
+    // Top Accent Bar
     page.drawRectangle({
-        x: 40,
-        y: 40,
-        width: 515,
-        height: 60,
-        color: rgb(0.94, 0.98, 1),
-        borderColor: rgb(0.01, 0.52, 0.78),
+        x: 35,
+        y: height - 43,
+        width: width - 70,
+        height: 8,
+        color: primaryColor,
+    });
+
+    // 2. Watermark Background Stamp
+    page.drawText('VERIFIED', {
+        x: 160,
+        y: height / 2 - 20,
+        size: 64,
+        font: fontBold,
+        color: rgb(0.96, 0.97, 0.98),
+        rotate: { type: 'degrees', angle: 30 },
+    });
+
+    // 3. Header Section
+    page.drawText('CLOUD PRINT KIOSK', {
+        x: 60,
+        y: height - 85,
+        size: 22,
+        font: fontBold,
+        color: primaryColor,
+    });
+
+    page.drawText('Self-Service Campus Print Network · Digital Invoice', {
+        x: 60,
+        y: height - 105,
+        size: 10,
+        font: fontRegular,
+        color: mutedTextColor,
+    });
+
+    // Header Right: Title & Stamp
+    page.drawText('PAYMENT RECEIPT', {
+        x: width - 230,
+        y: height - 85,
+        size: 16,
+        font: fontBold,
+        color: darkTextColor,
+    });
+
+    // Green Verified Pill
+    page.drawRectangle({
+        x: width - 230,
+        y: height - 112,
+        width: 170,
+        height: 20,
+        color: rgb(0.92, 0.98, 0.94),
+        borderColor: greenColor,
         borderWidth: 1,
     });
 
-    page.drawText('Thank you for using Cloud Print Kiosk!', {
-        x: 160,
-        y: 75,
-        size: 13,
+    page.drawText('PAID & AUTHENTICATED', {
+        x: width - 215,
+        y: height - 106,
+        size: 9,
         font: fontBold,
-        color: rgb(0.01, 0.52, 0.78),
+        color: greenColor,
     });
 
-    page.drawText('Please collect your printed document from the printer tray.', {
-        x: 120,
-        y: 52,
-        size: 10,
+    // Divider Line 1
+    page.drawLine({
+        start: { x: 60, y: height - 128 },
+        end: { x: width - 60, y: height - 128 },
+        thickness: 1,
+        color: borderColor,
+    });
+
+    let currentY = height - 155;
+
+    // Helper: Draw Section Title
+    const drawSectionTitle = (title) => {
+        page.drawText(title, {
+            x: 60,
+            y: currentY,
+            size: 11,
+            font: fontBold,
+            color: primaryColor,
+        });
+        currentY -= 20;
+    };
+
+    // Helper: Draw 2-column key-value row
+    const drawKeyValue = (key, val, isHighlight = false) => {
+        page.drawText(key, {
+            x: 60,
+            y: currentY,
+            size: 10,
+            font: fontBold,
+            color: mutedTextColor,
+        });
+        page.drawText(String(val), {
+            x: 230,
+            y: currentY,
+            size: 10,
+            font: isHighlight ? fontBold : fontRegular,
+            color: isHighlight ? darkTextColor : darkTextColor,
+        });
+        currentY -= 20;
+    };
+
+    // Section 1: Transaction Details
+    drawSectionTitle('TRANSACTION DETAILS');
+    drawKeyValue('Order ID:', orderData.orderId || 'ORD2026', true);
+    drawKeyValue('Receipt Date:', orderData.paidAt ? new Date(orderData.paidAt).toLocaleString() : new Date().toLocaleString());
+    drawKeyValue('Transaction ID:', orderData.transactionId || (orderData.paymentMethod === 'WALLET' ? 'WALLET_BALANCE' : 'ONLINE_RAZORPAY'));
+    drawKeyValue('Payment Channel:', orderData.paymentMethod || 'WhatsApp Cloud Print');
+    drawKeyValue('Collection Kiosk:', orderData.blockLocation || 'C Block Kiosk', true);
+
+    currentY -= 8;
+    page.drawLine({
+        start: { x: 60, y: currentY },
+        end: { x: width - 60, y: currentY },
+        thickness: 1,
+        color: borderColor,
+    });
+    currentY -= 22;
+
+    // Section 2: Document Specifications
+    drawSectionTitle('DOCUMENT SPECIFICATIONS');
+    const safeFileName = orderData.fileName && orderData.fileName.length > 40 ? orderData.fileName.substring(0, 37) + '...' : (orderData.fileName || 'Document.pdf');
+    drawKeyValue('File Name:', safeFileName, true);
+    drawKeyValue('Color Mode:', orderData.printType === 'COLOR' ? 'Full Color (High Quality)' : 'Black & White (B&W)');
+    drawKeyValue('Print Sides:', orderData.doubleSided ? 'Double Sided (Duplex)' : 'Single Sided (Simplex)');
+    drawKeyValue('Total Document Pages:', `${orderData.totalPages || 1} page(s)`);
+    drawKeyValue('Number of Copies:', `${orderData.copies || 1} copy(ies)`);
+
+    currentY -= 8;
+    page.drawLine({
+        start: { x: 60, y: currentY },
+        end: { x: width - 60, y: currentY },
+        thickness: 1,
+        color: borderColor,
+    });
+    currentY -= 22;
+
+    // Section 3: Payment Breakdown (Card Box)
+    drawSectionTitle('PAYMENT BREAKDOWN');
+
+    const boxY = currentY - 75;
+    page.drawRectangle({
+        x: 60,
+        y: boxY,
+        width: width - 120,
+        height: 85,
+        color: rgb(0.97, 0.98, 1),
+        borderColor: rgb(0.85, 0.90, 0.98),
+        borderWidth: 1,
+    });
+
+    const origPrice = orderData.originalPrice || orderData.price || 0;
+    const discount = orderData.discountAmount || 0;
+    const finalPrice = orderData.price || origPrice;
+
+    page.drawText('Original Amount:', { x: 80, y: boxY + 60, size: 10, font: fontRegular, color: mutedTextColor });
+    page.drawText(`Rs. ${Number(origPrice).toFixed(2)}`, { x: width - 180, y: boxY + 60, size: 10, font: fontRegular, color: darkTextColor });
+
+    page.drawText('Discount / Wallet Applied:', { x: 80, y: boxY + 40, size: 10, font: fontRegular, color: greenColor });
+    page.drawText(`- Rs. ${Number(discount).toFixed(2)}`, { x: width - 180, y: boxY + 40, size: 10, font: fontBold, color: greenColor });
+
+    page.drawLine({
+        start: { x: 80, y: boxY + 30 },
+        end: { x: width - 80, y: boxY + 30 },
+        thickness: 0.5,
+        color: rgb(0.8, 0.85, 0.9),
+    });
+
+    page.drawText('Total Paid:', { x: 80, y: boxY + 12, size: 12, font: fontBold, color: primaryColor });
+    page.drawText(`Rs. ${Number(finalPrice).toFixed(2)}`, { x: width - 180, y: boxY + 12, size: 13, font: fontBold, color: primaryColor });
+
+    // Section 4: Footer
+    page.drawRectangle({
+        x: 60,
+        y: 60,
+        width: width - 120,
+        height: 60,
+        color: rgb(0.98, 0.99, 1),
+        borderColor: borderColor,
+        borderWidth: 1,
+    });
+
+    page.drawText('Thank you for using Cloud Print Self-Service Kiosks!', {
+        x: 160,
+        y: 95,
+        size: 11,
+        font: fontBold,
+        color: primaryColor,
+    });
+
+    page.drawText('This is a system generated digital invoice. No physical signature is required.', {
+        x: 125,
+        y: 75,
+        size: 8.5,
         font: fontRegular,
-        color: rgb(0.3, 0.3, 0.3),
+        color: mutedTextColor,
     });
 
     const pdfBytes = await pdfDoc.save();
@@ -425,12 +566,118 @@ async function sendSmartMenu(sock, targetJid, title, bodyText, footerText, butto
             });
             menuText += `\n👉 *Reply with the number (e.g. 1 or 2)*`;
         }
-        if (footerText) {
-            menuText += `\n\n_${footerText}_`;
-        }
         await sock.sendMessage(targetJid, { text: menuText });
-    } catch (e) {
-        console.error("Send menu error:", e);
+    } catch (err) {
+        console.error("sendSmartMenu error:", err);
+    }
+}
+
+async function processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal) {
+    await sock.sendMessage(jid, { text: "⏳ *Processing your order with print kiosk server...*" });
+
+    let resData;
+    try {
+        const remoteForm = createUploadFormData(session, senderName, senderPhone);
+        const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
+        const response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
+        resData = response.data || {};
+    } catch (remoteErr) {
+        console.error("Order creation failed on backend:", remoteErr.message);
+        session.pending = null;
+        session.step = 'IDLE';
+        saveSessions(sessions);
+
+        if (remoteErr.code === 'ECONNABORTED' || remoteErr.message.includes('timeout')) {
+            await sock.sendMessage(jid, { 
+                text: "❌ *Transaction Failed (5-Min Timeout)*\n\nThe print server did not wake up or respond within 5 minutes.\n\nYour order has been cancelled and not charged. Please try again shortly." 
+            });
+        } else {
+            const errorMsg = (typeof remoteErr.response?.data === 'string' && remoteErr.response.data)
+                ? remoteErr.response.data
+                : (remoteErr.response?.data?.message || "❌ *Transaction Failed*: Could not create order on server. Please try again.");
+            await sock.sendMessage(jid, { text: errorMsg });
+        }
+        return;
+    }
+
+    const orderId = resData.orderId || 'ORD2026';
+    const userOtp = resData.otp || '';
+    const expiryDate = new Date(Date.now() + 15 * 60 * 1000);
+    const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+
+    if (resData.paidViaWallet) {
+        const paidMsg = `✅ *Payment Successful via Wallet Balance!* 🎉\n` +
+                        `-----------------------------------\n` +
+                        `💰 *Amount Paid*: *₹${(resData.estimatedTotal || estimatedTotal).toFixed(2)}*\n` +
+                        `💳 *Remaining Wallet Balance*: *₹${(resData.newBalance || 0.0).toFixed(2)}*\n` +
+                        `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                        `📺 *Release OTP*: Look at the *${session.blockLocation || 'Campus Kiosk'} TV Display Screen* for your 4-digit OTP\n` +
+                        `⏳ *OTP Validity*: *15 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
+                        `👉 *Once you see your 4-digit code on the TV screen, reply with it here in WhatsApp to release your print!*`;
+
+        await sock.sendMessage(jid, { text: paidMsg });
+
+        session.lastOrderId = orderId;
+        session.lastOtp = userOtp;
+        session.lastPrice = resData.estimatedTotal || estimatedTotal;
+        session.otpReleased = false;
+        session.paymentNotified = true;
+        session.paidTimestamp = Date.now();
+        session.lastReminderTimestamp = Date.now();
+        session.pending = null;
+        session.step = 'IDLE';
+        saveSessions(sessions);
+        return;
+    } else if (resData.partialWallet) {
+        const paymentUrl = resData.paymentUrl || `${FRONTEND_BASE}/pay?orderId=${orderId}`;
+        const payMsg = `💳 *Partial Wallet Payment Applied* (-₹${Number(resData.walletDeducted || 0).toFixed(2)})\n` +
+                     `💰 *Remaining Amount to Pay*: *₹${Number(resData.finalPriceToPay || estimatedTotal).toFixed(2)}*\n\n` +
+                     `💳 *Pay Remaining Online via Razorpay*:\n${paymentUrl}\n\n` +
+                     `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                     `📺 *Release OTP*: Look at the *Kiosk TV Display Screen* after completing payment\n` +
+                     `⏳ *Payment Window*: *5 Minutes*\n\n` +
+                     `Tap the link above to complete your UPI/Card payment! Once paid, look at the TV Display screen for your 4-digit OTP and reply with it here in WhatsApp to print at *${session.blockLocation || 'your campus kiosk'}*!`;
+
+        await sock.sendMessage(jid, { text: payMsg });
+
+        session.lastOrderId = orderId;
+        session.lastOtp = userOtp;
+        session.lastPrice = resData.finalPriceToPay;
+        session.otpReleased = false;
+        session.paymentNotified = false;
+        session.notifiedCompletion = false;
+        session.notifiedCancelled = false;
+        session.orderCreatedTimestamp = Date.now();
+        session.paidTimestamp = null;
+        session.lastReminderTimestamp = 0;
+        session.pending = null;
+        session.step = 'IDLE';
+        saveSessions(sessions);
+        return;
+    } else {
+        const paymentUrl = resData.paymentUrl || `${FRONTEND_BASE}/pay?orderId=${orderId}`;
+        const payMsg = `💳 *Pay Online via Razorpay*:\n${paymentUrl}\n\n` +
+                     `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                     `📺 *Release OTP*: Look at the *Kiosk TV Display Screen* after payment\n` +
+                     `⏳ *Payment Window*: *5 Minutes*\n\n` +
+                     `Tap the link above to complete your UPI/Card payment! Once paid, look at the TV Display screen for your 4-digit OTP and reply with it here in WhatsApp to print at *${session.blockLocation || 'your campus kiosk'}*!`;
+
+        await sock.sendMessage(jid, { text: payMsg });
+
+        session.lastOrderId = orderId;
+        session.lastOtp = userOtp;
+        session.lastPrice = estimatedTotal;
+        session.otpReleased = false;
+        session.paymentNotified = false;
+        session.notifiedCompletion = false;
+        session.notifiedCancelled = false;
+        session.orderCreatedTimestamp = Date.now();
+        session.paidTimestamp = null;
+        session.lastReminderTimestamp = 0;
+        session.pending = null;
+        session.step = 'IDLE';
+        saveSessions(sessions);
+        return;
     }
 }
 
@@ -932,8 +1179,7 @@ async function handleIncomingMessage(msg) {
                     saveSessions(sessions);
                     const blocks = collegesMap[session.college] || [];
                     await sock.sendMessage(jid, {
-                        text: `⚠️ *Kiosk Offline Alert*:\nYour selected kiosk (*${session.blockLocation}*) is currently offline or under maintenance.\n\n` +
-                              `Please select an active online kiosk block below before uploading your document:`
+                        text: `⚠️ *Kiosk Offline Alert*:\nYour selected kiosk (*${session.blockLocation}*) is currently offline or under maintenance.\n\nPlease select an active online kiosk block below before uploading your document:`
                     });
                     if (blocks.length > 0) {
                         await sendSmartMenu(
@@ -949,7 +1195,15 @@ async function handleIncomingMessage(msg) {
                 }
             }
 
-            await sock.sendMessage(jid, { text: "⏳ *Downloading and analyzing your document via Baileys Direct Engine... Please wait.*" });
+            // If user has an active pending order, ask them to release or cancel it first
+            if (session.lastOrderId && !session.otpReleased) {
+                await sock.sendMessage(jid, {
+                    text: `⚠️ *You already have an active order (*${session.lastOrderId}*)!*\n\n` +
+                          `📺 Look at the *${session.blockLocation || 'Campus Kiosk'} TV Display Screen* for your 4-digit code and reply with it here to print.\n\n` +
+                          `❌ Or reply *cancel* to cancel your previous order before sending a new file.`
+                });
+                return;
+            }
 
             let buffer;
             try {
@@ -1098,89 +1352,8 @@ async function handleIncomingMessage(msg) {
 
                     await sock.sendMessage(jid, { text: summaryText });
 
-                    // 1. If user has enough wallet balance, pay via wallet instantly
-                    if (userBalance >= estimatedTotal && estimatedTotal > 0) {
-                        await sock.sendMessage(jid, { text: "⏳ *Processing instant 1-Tap Wallet Payment...*" });
-                        try {
-                            const remoteForm = createUploadFormData(session, senderName, senderPhone);
-                            const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
-                            const response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
-                            const resData = response.data || {};
-                            const orderId = resData.orderId || 'ORD2026';
-
-                            const walletRes = await axios.post(`${BACKEND_BASE}/api/bot/pay-via-wallet?orderId=${orderId}&phoneNumber=${senderPhone}`, null, { timeout: 30000 });
-                            const wData = walletRes.data || {};
-                            if (wData.success) {
-                                const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
-                                const userOtp = resData.otp || '';
-                                const paidMsg = `✅ *Payment Successful via Wallet Balance!* 🎉\n` +
-                                                `-----------------------------------\n` +
-                                                `💰 *Amount Paid*: *₹${estimatedTotal.toFixed(2)}*\n` +
-                                                `💳 *Remaining Wallet Balance*: *₹${(wData.newBalance || 0.0).toFixed(2)}*\n` +
-                                                `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
-                                                `📺 *Release OTP*: Displayed on *${session.blockLocation || 'Campus Kiosk'} TV Display Screen*\n` +
-                                                `⏳ *OTP Validity*: *15 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
-                                                `👉 *Look at the TV Display Panel at ${session.blockLocation || 'Campus Kiosk'} to find your 4-digit OTP, then reply with the code here in WhatsApp to release your print!*`;
-
-                                await sock.sendMessage(jid, { text: paidMsg });
-
-                                session.lastOrderId = orderId;
-                                session.lastOtp = userOtp;
-                                session.lastPrice = estimatedTotal;
-                                session.otpReleased = false;
-                                session.paymentNotified = true;
-                                session.paidTimestamp = Date.now();
-                                session.lastReminderTimestamp = Date.now();
-                                session.pending = null;
-                                session.step = 'IDLE';
-                                saveSessions(sessions);
-                                return;
-                            }
-                        } catch (wErr) {
-                            console.error("Quick Print wallet payment error:", wErr.message);
-                        }
-                    }
-
-                    // 2. Otherwise generate and send direct Razorpay Payment Link right away
-                    await sock.sendMessage(jid, { text: "⏳ *Generating online payment link...*" });
-                    try {
-                        const remoteForm = createUploadFormData(session, senderName, senderPhone);
-                        const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
-                        const response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
-                        const resData = response.data || {};
-                        const orderId = resData.orderId || 'ORD2026';
-                        const paymentUrl = resData.paymentUrl || `${FRONTEND_BASE}/pay?orderId=${orderId}`;
-                        const userOtp = resData.otp || '';
-
-                        const payMsg = `💳 *Pay Online via Razorpay*:\n${paymentUrl}\n\n` +
-                                     `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
-                                     `📺 *Release OTP*: Look at the *Kiosk TV Display Screen* after payment\n` +
-                                     `⏳ *Payment Window*: *5 Minutes*\n\n` +
-                                     `Tap the link above to complete your UPI/Card payment! Once paid, look at the TV Display screen for your 4-digit OTP and reply with it here in WhatsApp to print at *${session.blockLocation || 'your campus kiosk'}*!`;
-                        await sock.sendMessage(jid, { text: payMsg });
-
-                        session.lastOrderId = orderId;
-                        session.lastOtp = userOtp;
-                        session.lastPrice = estimatedTotal;
-                        session.otpReleased = false;
-                        session.paymentNotified = false;
-                        session.notifiedCompletion = false;
-                        session.notifiedCancelled = false;
-                        session.orderCreatedTimestamp = Date.now();
-                        session.paidTimestamp = null;
-                        session.lastReminderTimestamp = 0;
-                        session.pending = null;
-                        session.step = 'IDLE';
-                        saveSessions(sessions);
-                        return;
-                    } catch (remoteErr) {
-                        console.error("Quick Print order creation failed:", remoteErr.message);
-                        session.pending = null;
-                        session.step = 'IDLE';
-                        saveSessions(sessions);
-                        await sock.sendMessage(jid, { text: "❌ *Transaction Failed*: Could not generate payment link right now. Please try again later." });
-                        return;
-                    }
+                    await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal);
+                    return;
                 } else if (session.pending.isImage && (textLower.includes('color') || textLower.includes('colour') || textLower === '2')) {
                     const colorCheck = await checkKioskPrinterStatus(session.blockLocation, 'COLOR');
                     if (!colorCheck.available) {
@@ -1216,91 +1389,8 @@ async function handleIncomingMessage(msg) {
 
                     await sock.sendMessage(jid, { text: summaryText });
 
-                    // 1. Wallet payment
-                    if (userBalance >= estimatedTotal && estimatedTotal > 0) {
-                        await sock.sendMessage(jid, { text: "⏳ *Processing instant 1-Tap Wallet Payment...*" });
-                        try {
-                            const remoteForm = createUploadFormData(session, senderName, senderPhone);
-                            const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
-                            const response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
-                            const resData = response.data || {};
-                            const orderId = resData.orderId || 'ORD2026';
-
-                            const walletRes = await axios.post(`${BACKEND_BASE}/api/bot/pay-via-wallet?orderId=${orderId}&phoneNumber=${senderPhone}`, null, { timeout: 30000 });
-                            const wData = walletRes.data || {};
-                            if (wData.success) {
-                                const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
-                                const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
-                                const userOtp = resData.otp || '';
-
-                                const paidMsg = `✅ *Payment Successful via Wallet Balance!* 🎉\n` +
-                                                `-----------------------------------\n` +
-                                                `💰 *Amount Paid*: *₹${estimatedTotal.toFixed(2)}*\n` +
-                                                `💳 *Remaining Wallet Balance*: *₹${(wData.newBalance || 0.0).toFixed(2)}*\n` +
-                                                `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
-                                                `📺 *Release OTP*: Displayed on *${session.blockLocation || 'Campus Kiosk'} TV Display Screen*\n` +
-                                                `⏳ *OTP Validity*: *15 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
-                                                `👉 *Look at the TV Display Panel at ${session.blockLocation || 'Campus Kiosk'} to find your 4-digit OTP, then reply with the code here in WhatsApp to release your print!*`;
-
-                                await sock.sendMessage(jid, { text: paidMsg });
-
-                                session.lastOrderId = orderId;
-                                session.lastOtp = userOtp;
-                                session.lastPrice = estimatedTotal;
-                                session.otpReleased = false;
-                                session.paymentNotified = true;
-                                session.paidTimestamp = Date.now();
-                                session.lastReminderTimestamp = Date.now();
-                                session.pending = null;
-                                session.step = 'IDLE';
-                                saveSessions(sessions);
-                                return;
-                            }
-                        } catch (wErr) {
-                            console.error("Quick Color wallet payment error:", wErr.message);
-                        }
-                    }
-
-                    // 2. Razorpay payment link
-                    await sock.sendMessage(jid, { text: "⏳ *Generating online payment link...*" });
-                    try {
-                        const remoteForm = createUploadFormData(session, senderName, senderPhone);
-                        const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
-                        const response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
-                        const resData = response.data || {};
-                        const orderId = resData.orderId || 'ORD2026';
-                        const paymentUrl = resData.paymentUrl || `${FRONTEND_BASE}/pay?orderId=${orderId}`;
-                        const userOtp = resData.otp || '';
-
-                        const payMsg = `💳 *Pay Online via Razorpay*:\n${paymentUrl}\n\n` +
-                                     `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
-                                     `📺 *Release OTP*: Look at the *Kiosk TV Display Screen* after payment\n` +
-                                     `⏳ *Payment Window*: *5 Minutes*\n\n` +
-                                     `Tap the link above to complete your UPI/Card payment! Once paid, look at the TV Display screen for your 4-digit OTP and reply with it here in WhatsApp to print at *${session.blockLocation || 'your campus kiosk'}*!`;
-                        await sock.sendMessage(jid, { text: payMsg });
-
-                        session.lastOrderId = orderId;
-                        session.lastOtp = userOtp;
-                        session.lastPrice = estimatedTotal;
-                        session.otpReleased = false;
-                        session.paymentNotified = false;
-                        session.notifiedCompletion = false;
-                        session.notifiedCancelled = false;
-                        session.orderCreatedTimestamp = Date.now();
-                        session.paidTimestamp = null;
-                        session.lastReminderTimestamp = 0;
-                        session.pending = null;
-                        session.step = 'IDLE';
-                        saveSessions(sessions);
-                        return;
-                    } catch (remoteErr) {
-                        console.error("Quick Color order creation failed:", remoteErr.message);
-                        session.pending = null;
-                        session.step = 'IDLE';
-                        saveSessions(sessions);
-                        await sock.sendMessage(jid, { text: "❌ *Transaction Failed*: Could not generate payment link right now. Please try again later." });
-                        return;
-                    }
+                    await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal);
+                    return;
                 } else if (session.pending.isImage && (textLower.includes('custom') || textLower.includes('cop') || textLower === '3')) {
                     // Images have no page range or duplex mode: skip directly to Color selection
                     session.pending.selectedPages = 'ALL';
@@ -1508,147 +1598,18 @@ async function handleIncomingMessage(msg) {
 
                 const userBal = session.pending?.userBalance || 0.0;
                 const totalAmt = session.pending?.estimatedTotal || 0.0;
-                const hasEnoughWallet = userBal >= totalAmt;
+                const isCancel = textLower.includes('cancel') || (userBal >= totalAmt && textLower === '3') || (userBal < totalAmt && textLower === '2');
 
-                const isWalletChoice = hasEnoughWallet && (textLower.includes('wallet') || textLower === '1');
-                const isRazorpayChoice = (hasEnoughWallet && (textLower.includes('razorpay') || textLower.includes('online') || textLower === '2'))
-                                         || (!hasEnoughWallet && (textLower.includes('confirm') || textLower.includes('yes') || textLower === 'y' || textLower === 'ok' || textLower === '1'));
-                const isCancelChoice = (hasEnoughWallet && (textLower.includes('cancel') || textLower === '3'))
-                                       || (!hasEnoughWallet && (textLower.includes('cancel') || textLower === '2'));
-
-                if (isWalletChoice) {
-                    await sock.sendMessage(jid, { text: "⏳ *Processing instant wallet payment... Waiting for server (up to 5 min)...*" });
-
-                    let uploadRes;
-                    try {
-                        const remoteForm = createUploadFormData(session, senderName, senderPhone);
-                        const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
-                        // 5-Minute timeout (300,000 ms)
-                        uploadRes = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
-                    } catch (remoteErr) {
-                        console.error("Order creation failed on backend:", remoteErr.message);
-                        session.pending = null;
-                        session.step = 'IDLE';
-                        saveSessions(sessions);
-
-                        if (remoteErr.code === 'ECONNABORTED' || remoteErr.message.includes('timeout')) {
-                            await sock.sendMessage(jid, { 
-                                text: "❌ *Transaction Failed (5-Min Timeout)*\n\nThe print server did not wake up or respond within 5 minutes.\n\nYour order has been cancelled and not charged. Please try again shortly." 
-                            });
-                        } else {
-                            const errorMsg = (typeof remoteErr.response?.data === 'string' && remoteErr.response.data)
-                                ? remoteErr.response.data
-                                : (remoteErr.response?.data?.message || "❌ *Transaction Failed*: Could not create order on server. Please try again.");
-                            await sock.sendMessage(jid, { text: errorMsg });
-                        }
-                        return;
-                    }
-
-                    const orderId = uploadRes.data?.orderId || 'ORD2026';
-
-                    try {
-                        const walletRes = await axios.post(`${BACKEND_BASE}/api/bot/pay-via-wallet?orderId=${orderId}&phoneNumber=${senderPhone}`, null, { timeout: 30000 });
-                        const wData = walletRes.data || {};
-                        if (wData.success) {
-                            const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
-                            const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
-                            const userOtp = uploadRes.data?.otp || '';
-
-                            const paidMsg = `✅ *Payment Successful via Wallet Balance!* 🎉\n` +
-                                            `-----------------------------------\n` +
-                                            `💰 *Amount Paid*: *₹${totalAmt.toFixed(2)}*\n` +
-                                            `💳 *Remaining Wallet Balance*: *₹${(wData.newBalance || 0.0).toFixed(2)}*\n` +
-                                            `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
-                                            `📺 *Release OTP*: Displayed on *${session.blockLocation || 'Campus Kiosk'} TV Display Screen*\n` +
-                                            `⏳ *OTP Validity*: *15 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
-                                            `👉 *Look at the TV Display Panel at ${session.blockLocation || 'Campus Kiosk'} to find your 4-digit OTP, then reply with the code here in WhatsApp to release your print!*`;
-
-                            await sock.sendMessage(jid, { text: paidMsg });
-
-                            session.lastOrderId = orderId;
-                            session.lastOtp = userOtp;
-                            session.lastPrice = totalAmt;
-                            session.otpReleased = false;
-                            session.paymentNotified = true;
-                            session.paidTimestamp = Date.now();
-                            session.lastReminderTimestamp = Date.now();
-                            session.pending = null;
-                            session.step = 'IDLE';
-                            saveSessions(sessions);
-                            return;
-                        } else {
-                            await sock.sendMessage(jid, { text: `⚠️ *Wallet Payment Failed*: ${wData.message || 'Insufficient balance'}` });
-                            return;
-                        }
-                    } catch (wErr) {
-                        console.error("Wallet payment request error:", wErr.message);
-                        await sock.sendMessage(jid, { text: "⚠️ *Wallet Payment Failed*. Please try paying online via Razorpay." });
-                        return;
-                    }
-                } else if (isRazorpayChoice) {
-                    await sock.sendMessage(jid, { text: "⏳ *Creating your order and payment link... Waiting for server (up to 5 min)...*" });
-
-                    let response;
-                    try {
-                        const remoteForm = createUploadFormData(session, senderName, senderPhone);
-                        const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
-                        // 5-Minute timeout (300,000 ms)
-                        response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
-                    } catch (remoteErr) {
-                        console.error("Order creation failed on backend:", remoteErr.message);
-                        session.pending = null;
-                        session.step = 'IDLE';
-                        saveSessions(sessions);
-
-                        if (remoteErr.code === 'ECONNABORTED' || remoteErr.message.includes('timeout')) {
-                            await sock.sendMessage(jid, { 
-                                text: "❌ *Transaction Failed (5-Min Timeout)*\n\nThe print server did not wake up or respond within 5 minutes.\n\nYour order has been cancelled and not charged. Please try again shortly." 
-                            });
-                        } else {
-                            const errorMsg = (typeof remoteErr.response?.data === 'string' && remoteErr.response.data)
-                                ? remoteErr.response.data
-                                : (remoteErr.response?.data?.message || "❌ *Transaction Failed*: Could not generate payment link right now. Please try again later.");
-                            await sock.sendMessage(jid, { text: errorMsg });
-                        }
-                        return;
-                    }
-
-                    const resData = response.data || {};
-                    const orderId = resData.orderId || 'ORD2026';
-                    const paymentUrl = resData.paymentUrl || `${FRONTEND_BASE}/pay?orderId=${orderId}`;
-                    const userOtp = resData.otp || '';
-
-                    let payMsg = `💳 *Pay Online via Razorpay*:\n${paymentUrl}\n\n` +
-                                 `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
-                                 `📺 *Release OTP*: Look at the *Kiosk TV Display Screen* after payment\n` +
-                                 `⏳ *Payment Window*: *5 Minutes*\n\n` +
-                                 `Tap link above to complete payment online! Once paid, look at the TV Display screen for your 4-digit OTP and reply with it here in WhatsApp to print at *${session.blockLocation || 'your campus kiosk'}*!`;
-                    await sock.sendMessage(jid, { text: payMsg });
-
-                    session.lastOrderId = orderId;
-                    session.lastOtp = userOtp;
-                    session.lastPrice = resData.estimatedTotal || session.pending.estimatedTotal;
-                    session.otpReleased = false;
-                    session.paymentNotified = false;
-                    session.notifiedCompletion = false;
-                    session.notifiedCancelled = false;
-                    session.orderCreatedTimestamp = Date.now();
-                    session.paidTimestamp = null;
-                    session.lastReminderTimestamp = 0;
-                    session.pending = null;
-                    session.step = 'IDLE';
-                    saveSessions(sessions);
-                    return;
-                } else if (isCancelChoice) {
+                if (isCancel) {
                     session.pending = null;
                     session.step = 'IDLE';
                     saveSessions(sessions);
                     await sock.sendMessage(jid, { text: "❌ Order draft cancelled. You can attach a new file to print anytime!" });
                     return;
-                } else {
-                    await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with a valid option number.` });
-                    return;
                 }
+
+                await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, totalAmt);
+                return;
             }
         }
 
@@ -1814,32 +1775,49 @@ function startOrderMonitoring() {
                             }
                         }
 
-                        // 3. Print Completed Notification & PDF Receipt
+                        // 3. Print Completed Notification & Ask for Receipt
                         if (data.status === 'COMPLETED' && !session.notifiedCompletion) {
                             const priceVal = data.price || session.lastPrice || 0;
                             const priceFormatted = typeof priceVal === 'number' ? priceVal : (parseFloat(priceVal) || 0);
 
-                            const pdfBuffer = await createReceiptPdf({
-                                orderId: session.lastOrderId,
+                            session.completedOrderData = {
+                                orderId: session.lastOrderId || data.orderId,
                                 fileName: data.fileName || 'Document.pdf',
                                 totalPages: data.totalPages || 1,
                                 doubleSided: data.doubleSided || false,
                                 printType: data.printType || 'BW',
                                 copies: data.copies || 1,
                                 price: priceFormatted,
-                                blockLocation: session.blockLocation || 'Campus Kiosk'
-                            });
+                                originalPrice: data.originalPrice || priceFormatted,
+                                discountAmount: data.discountAmount || 0,
+                                blockLocation: session.blockLocation || data.blockLocation || 'Campus Kiosk',
+                                transactionId: data.razorpayPaymentId || 'WALLET_PAYMENT',
+                                paymentMethod: data.orderChannel === 'WHATSAPP' ? 'WhatsApp Cloud Print' : 'Web Portal',
+                                paidAt: data.paidAt || Date.now()
+                            };
 
-                            await sock.sendMessage(targetJid, {
-                                document: pdfBuffer,
-                                mimetype: 'application/pdf',
-                                fileName: `Print_Receipt_${session.lastOrderId}.pdf`,
-                                caption: `🧾 *Official Print Receipt for Order ${session.lastOrderId}*\n\n🎉 *Print Job Complete!* Please collect your printed document from the printer tray right now. Thank you for using Cloud Print!`
-                            });
+                            const completionMsg = `🎉 *Print Job Complete!* 🖨️\n\n` +
+                                                  `Your document has been printed and is ready in the *${session.blockLocation || data.blockLocation || 'Campus Kiosk'}* tray. Please collect your pages!\n\n` +
+                                                  `🧾 *Would you like an Official Payment Receipt PDF?*\n` +
+                                                  `1️⃣  *Yes, send receipt*\n` +
+                                                  `2️⃣  *No, thank you*\n\n` +
+                                                  `👉 *Reply with 1 or 2*`;
 
-                            session.lastOrderId = null;
-                            session.lastOtp = null;
+                            await sock.sendMessage(targetJid, { text: completionMsg });
+
+                            session.step = 'ASK_RECEIPT';
+                            session.receiptAskTimestamp = nowMs;
                             session.notifiedCompletion = true;
+                            updated = true;
+                        }
+
+                        // 3b. Check if ASK_RECEIPT timed out (3 minutes = 180,000 ms) with no response
+                        if (session.step === 'ASK_RECEIPT' && session.receiptAskTimestamp && (nowMs - session.receiptAskTimestamp > 180000)) {
+                            await sock.sendMessage(targetJid, { text: "🥰 *Thank you for using Cloud Print!* Have a wonderful day! 🖨️✨" });
+                            session.step = 'IDLE';
+                            session.completedOrderData = null;
+                            session.lastOrderId = null;
+                            session.receiptAskTimestamp = null;
                             updated = true;
                         }
 

@@ -106,9 +106,7 @@ async function processBlock(blockConfig) {
 
     cleanup(filePath);
 
-    // Print job pushed directly to OS spooler; mark order completed
-    await delay(1000);
-
+    // Print job pushed directly to OS spooler; mark order completed immediately
     await axios.post(
         `${backendUrl}/api/queue/complete`,
         null,

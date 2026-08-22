@@ -259,7 +259,7 @@ function getFriendlyChatResponse(textLower, rawText, senderName, session) {
                `-----------------------------------\n` +
                `1️⃣ *Send File*: Attach your PDF or Image in this WhatsApp chat.\n` +
                `2️⃣ *Select Settings*: Choose pages & color mode, then pay online.\n` +
-               `3️⃣ *Collect Print*: Go to your kiosk screen (*${session.blockLocation || 'C Block'}*), view your 4-digit Release OTP on the display, and collect your paper!\n\n` +
+               `3️⃣ *Collect Print*: Reply with your 4-digit OTP right here in WhatsApp when you are at *${session.blockLocation || 'C Block'}* to release your print directly to the printer tray!\n\n` +
                `It's super simple! Just send your file to begin. 😊`;
     }
 
@@ -700,10 +700,10 @@ async function handleIncomingMessage(msg) {
 
             if (activeOrderToRelease) {
                 try {
-                    const releaseRes = await axios.post(`${BACKEND_BASE}/api/pdf/releasePrint?orderId=${activeOrderToRelease}&otp=${rawText}`, null, { timeout: 10000 });
+                    const releaseRes = await axios.post(`${BACKEND_BASE}/api/pdf/releasePrint?orderId=${activeOrderToRelease}&otp=${rawText.trim()}`, null, { timeout: 10000 });
                     if (releaseRes.data) {
                         await sock.sendMessage(jid, {
-                            text: `✅ *OTP Verified (${rawText})!*\n\n🖨️ *Print Job Spooling...* Your document is being printed at *${session.blockLocation || 'Kiosk'}* printer tray.\n\nReceipt & pickup notification will be sent upon completion!`
+                            text: `✅ *OTP Verified (${rawText.trim()})!*\n\n🖨️ *Print Job Spooling...* Your document is being printed right now at *${session.blockLocation || 'Kiosk'}* printer tray.\n\nReceipt & pickup notification will be sent upon completion!`
                         });
                         session.otpReleased = true;
                         saveSessions(sessions);
@@ -711,20 +711,21 @@ async function handleIncomingMessage(msg) {
                     }
                 } catch (otpErr) {
                     await sock.sendMessage(jid, {
-                        text: `📺 *Kiosk Screen Keypad*: Please enter your 4-digit Release OTP directly on the kiosk display keypad at *${session.blockLocation || 'C Block'}* to collect your print!`
+                        text: `⚠️ *Incorrect OTP ("${rawText.trim()}")!*\n\nPlease check your 4-digit Release OTP and reply with the correct code here in WhatsApp to release your print at *${session.blockLocation || 'Campus Kiosk'}*.`
                     });
                     return;
                 }
             }
         }
 
-        // Active Order Lock: If user has an unreleased active order, guide them to check display screen
+        // Active Order Lock: If user has an unreleased active order, guide them to enter OTP in WhatsApp
         if (session.lastOrderId && !session.otpReleased && !session.pending) {
             await sock.sendMessage(jid, {
-                text: `⚠️ *Active Order Pending Release (*${session.lastOrderId}*)!*\n\n` +
-                      `📍 *Target Kiosk*: ${session.blockLocation || 'Campus Kiosk'}\n\n` +
-                      `🏃‍♂️ *Please go to the ${session.blockLocation || 'Campus Kiosk'} display screen* to check your 4-digit Release OTP and enter it on the kiosk keypad.\n` +
-                      `❌ *To cancel*: Reply *cancel* to cancel this order.`
+                text: `🔐 *Enter OTP to Release Print (*${session.lastOrderId}*)!*\n\n` +
+                      `📍 *Target Kiosk*: ${session.blockLocation || 'Campus Kiosk'}\n` +
+                      (session.lastOtp ? `🔐 *Your OTP*: *${session.lastOtp}*\n\n` : '\n') +
+                      `👉 *Please reply with your 4-digit OTP right here in WhatsApp* to release and print your pages directly!\n\n` +
+                      `❌ *To cancel*: Reply *cancel* to cancel this order and refund.`
             });
             return;
         }
@@ -1111,19 +1112,20 @@ async function handleIncomingMessage(msg) {
                             const wData = walletRes.data || {};
                             if (wData.success) {
                                 const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
-                                const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
-
+                                const userOtp = resData.otp || '';
                                 const paidMsg = `✅ *Payment Successful via Wallet Balance!* 🎉\n` +
                                                 `-----------------------------------\n` +
                                                 `💰 *Amount Paid*: *₹${estimatedTotal.toFixed(2)}*\n` +
                                                 `💳 *Remaining Wallet Balance*: *₹${(wData.newBalance || 0.0).toFixed(2)}*\n` +
                                                 `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                                                (userOtp ? `🔐 *Your 4-Digit Release OTP*: *${userOtp}*\n` : '') +
                                                 `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
-                                                `📺 *Please check your 4-digit Release OTP on the ${session.blockLocation || 'Campus Kiosk'} kiosk display screen* and enter it on the keypad before *${expiryTimeStr}* to print!`;
+                                                `👉 *Whenever you are near the ${session.blockLocation || 'Campus Kiosk'} printer, simply reply with your 4-digit OTP (*${userOtp}*) right here in WhatsApp* to release your print directly to the tray!`;
 
                                 await sock.sendMessage(jid, { text: paidMsg });
 
                                 session.lastOrderId = orderId;
+                                session.lastOtp = userOtp;
                                 session.lastPrice = estimatedTotal;
                                 session.otpReleased = false;
                                 session.paymentNotified = true;
@@ -1148,13 +1150,16 @@ async function handleIncomingMessage(msg) {
                         const resData = response.data || {};
                         const orderId = resData.orderId || 'ORD2026';
                         const paymentUrl = resData.paymentUrl || `${FRONTEND_BASE}/pay?orderId=${orderId}`;
+                        const userOtp = resData.otp || '';
 
                         const payMsg = `💳 *Pay Online via Razorpay*:\n${paymentUrl}\n\n` +
+                                     (userOtp ? `🔐 *Your 4-Digit Release OTP*: *${userOtp}*\n` : '') +
                                      `⏳ *Payment Window*: *3 Minutes* (Order automatically cancels if unpaid within 3 minutes)\n\n` +
-                                     `Tap the link above to complete your UPI/Card payment! Once paid, your order will be sent to the kiosk display queue.`;
+                                     `Tap the link above to complete your UPI/Card payment! Once paid, simply reply with your 4-digit OTP (*${userOtp}*) right here in WhatsApp to print at *${session.blockLocation || 'your campus kiosk'}*!`;
                         await sock.sendMessage(jid, { text: payMsg });
 
                         session.lastOrderId = orderId;
+                        session.lastOtp = userOtp;
                         session.lastPrice = estimatedTotal;
                         session.otpReleased = false;
                         session.paymentNotified = false;
@@ -1225,18 +1230,21 @@ async function handleIncomingMessage(msg) {
                             if (wData.success) {
                                 const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
                                 const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+                                const userOtp = resData.otp || '';
 
                                 const paidMsg = `✅ *Payment Successful via Wallet Balance!* 🎉\n` +
                                                 `-----------------------------------\n` +
                                                 `💰 *Amount Paid*: *₹${estimatedTotal.toFixed(2)}*\n` +
                                                 `💳 *Remaining Wallet Balance*: *₹${(wData.newBalance || 0.0).toFixed(2)}*\n` +
                                                 `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                                                (userOtp ? `🔐 *Your 4-Digit Release OTP*: *${userOtp}*\n` : '') +
                                                 `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
-                                                `📺 *Please check your 4-digit Release OTP on the ${session.blockLocation || 'Campus Kiosk'} kiosk display screen* and enter it on the keypad before *${expiryTimeStr}* to print!`;
+                                                `👉 *Whenever you are near the ${session.blockLocation || 'Campus Kiosk'} printer, simply reply with your 4-digit OTP (*${userOtp}*) right here in WhatsApp* to release your print directly to the tray!`;
 
                                 await sock.sendMessage(jid, { text: paidMsg });
 
                                 session.lastOrderId = orderId;
+                                session.lastOtp = userOtp;
                                 session.lastPrice = estimatedTotal;
                                 session.otpReleased = false;
                                 session.paymentNotified = true;
@@ -1261,13 +1269,16 @@ async function handleIncomingMessage(msg) {
                         const resData = response.data || {};
                         const orderId = resData.orderId || 'ORD2026';
                         const paymentUrl = resData.paymentUrl || `${FRONTEND_BASE}/pay?orderId=${orderId}`;
+                        const userOtp = resData.otp || '';
 
                         const payMsg = `💳 *Pay Online via Razorpay*:\n${paymentUrl}\n\n` +
+                                     (userOtp ? `🔐 *Your 4-Digit Release OTP*: *${userOtp}*\n` : '') +
                                      `⏳ *Payment Window*: *3 Minutes* (Order automatically cancels if unpaid within 3 minutes)\n\n` +
-                                     `Tap the link above to complete your UPI/Card payment! Once paid, your order will be sent to the kiosk display queue.`;
+                                     `Tap the link above to complete your UPI/Card payment! Once paid, simply reply with your 4-digit OTP (*${userOtp}*) right here in WhatsApp to print at *${session.blockLocation || 'your campus kiosk'}*!`;
                         await sock.sendMessage(jid, { text: payMsg });
 
                         session.lastOrderId = orderId;
+                        session.lastOtp = userOtp;
                         session.lastPrice = estimatedTotal;
                         session.otpReleased = false;
                         session.paymentNotified = false;
@@ -1539,18 +1550,21 @@ async function handleIncomingMessage(msg) {
                         if (wData.success) {
                             const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
                             const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+                            const userOtp = uploadRes.data?.otp || '';
 
                             const paidMsg = `✅ *Payment Successful via Wallet Balance!* 🎉\n` +
                                             `-----------------------------------\n` +
                                             `💰 *Amount Paid*: *₹${totalAmt.toFixed(2)}*\n` +
                                             `💳 *Remaining Wallet Balance*: *₹${(wData.newBalance || 0.0).toFixed(2)}*\n` +
                                             `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                                            (userOtp ? `🔐 *Your 4-Digit Release OTP*: *${userOtp}*\n` : '') +
                                             `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
-                                            `📺 *Please check your 4-digit Release OTP on the ${session.blockLocation || 'Campus Kiosk'} kiosk display screen* and enter it on the display keypad before *${expiryTimeStr}* to collect your paper!`;
+                                            `👉 *Whenever you are near the ${session.blockLocation || 'Campus Kiosk'} printer, simply reply with your 4-digit OTP (*${userOtp}*) right here in WhatsApp* to release your print directly to the tray!`;
 
                             await sock.sendMessage(jid, { text: paidMsg });
 
                             session.lastOrderId = orderId;
+                            session.lastOtp = userOtp;
                             session.lastPrice = totalAmt;
                             session.otpReleased = false;
                             session.paymentNotified = true;
@@ -1600,13 +1614,16 @@ async function handleIncomingMessage(msg) {
                     const resData = response.data || {};
                     const orderId = resData.orderId || 'ORD2026';
                     const paymentUrl = resData.paymentUrl || `${FRONTEND_BASE}/pay?orderId=${orderId}`;
+                    const userOtp = resData.otp || '';
 
                     let payMsg = `💳 *Pay Online via Razorpay*:\n${paymentUrl}\n\n` +
+                                 (userOtp ? `🔐 *Your 4-Digit Release OTP*: *${userOtp}*\n` : '') +
                                  `⏳ *Payment Window*: *3 Minutes* (Order automatically cancels if unpaid within 3 minutes)\n\n` +
-                                 `Tap link above to complete payment online! Once your payment is confirmed, your 4-digit Release OTP and countdown will be sent here immediately.`;
+                                 `Tap link above to complete payment online! Once paid, reply with your 4-digit OTP (*${userOtp}*) right here in WhatsApp to print at *${session.blockLocation || 'your campus kiosk'}*!`;
                     await sock.sendMessage(jid, { text: payMsg });
 
                     session.lastOrderId = orderId;
+                    session.lastOtp = userOtp;
                     session.lastPrice = resData.estimatedTotal || session.pending.estimatedTotal;
                     session.otpReleased = false;
                     session.paymentNotified = false;
@@ -1743,13 +1760,16 @@ function startOrderMonitoring() {
                             const expiryDate = new Date(nowMs + 10 * 60 * 1000);
                             const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
 
+                            const userOtp = data.otpCode || session.lastOtp || '';
                             const msgText = `✅ *Payment Confirmed for Order ${session.lastOrderId}!* 🎉\n\n` +
                                             `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                                            (userOtp ? `🔐 *Your 4-Digit Release OTP*: *${userOtp}*\n` : '') +
                                             `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
-                                            `📺 *Please check your 4-digit Release OTP on the ${session.blockLocation || 'Campus Kiosk'} kiosk display screen* and enter it on the display keypad before *${expiryTimeStr}* to collect your paper!`;
+                                            `👉 *Whenever you are near the ${session.blockLocation || 'Campus Kiosk'} printer, simply reply with your 4-digit OTP (*${userOtp}*) right here in WhatsApp* to release your print directly to the printer tray!`;
 
                             await sock.sendMessage(targetJid, { text: msgText });
                             session.paymentNotified = true;
+                            if (userOtp) session.lastOtp = userOtp;
                             session.paidTimestamp = nowMs;
                             session.lastReminderTimestamp = nowMs;
                             updated = true;
@@ -1762,12 +1782,14 @@ function startOrderMonitoring() {
                             const totalLimitMs = 10 * 60 * 1000;
                             const remainingMs = Math.max(0, totalLimitMs - timeSincePaid);
                             const minutesLeft = Math.ceil(remainingMs / 60000);
+                            const userOtp = data.otpCode || session.lastOtp || '';
 
                             if (nowMs - lastReminder >= 120000 && minutesLeft > 0) {
                                 const reminderText = `⏰ *REMINDER: Print Order Pending Release (${session.lastOrderId})!*\n\n` +
                                                      `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                                                     (userOtp ? `🔐 *Your OTP*: *${userOtp}*\n` : '') +
                                                      `⏳ *Time Remaining Before Expiry*: *${minutesLeft} minute(s)*\n\n` +
-                                                     `🏃‍♂️ Please check your 4-digit OTP on the ${session.blockLocation || 'Campus Kiosk'} kiosk display screen and enter it on the keypad before time expires if not the order will be cancelled!`;
+                                                     `👉 *Reply with your 4-digit OTP here in WhatsApp* to release your print at ${session.blockLocation || 'Campus Kiosk'} before time expires!`;
 
                                 await sock.sendMessage(targetJid, { text: reminderText });
                                 session.lastReminderTimestamp = nowMs;

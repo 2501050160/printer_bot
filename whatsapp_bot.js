@@ -932,35 +932,78 @@ async function handleIncomingMessage(msg) {
             }
         }
 
-        // Check if user is entering 4-Digit Release OTP (Processed FIRST before Active Lock)
-        if (/^\d{4}$/.test(rawText)) {
+        // Check if user is entering 4-Digit Release OTP (Processed FIRST before any menus or locks)
+        const trimmedOtp = (rawText || '').trim();
+        if (/^\d{4}$/.test(trimmedOtp)) {
             let activeOrderToRelease = session.lastOrderId;
 
+            // If session doesn't have the order ID, query active orders to find the student's order matching phone or OTP
             if (!activeOrderToRelease) {
                 try {
-                    const pendingRes = await axios.get(`${BACKEND_BASE}/api/pdf/pendingScan?userId=${senderPhone}&blockLocation=${session.blockLocation || ''}`);
-                    if (pendingRes.data && Array.isArray(pendingRes.data) && pendingRes.data.length > 0) {
-                        activeOrderToRelease = pendingRes.data[0].orderId;
+                    const ordersRes = await axios.get(`${BACKEND_BASE}/api/pdf/orders`, { params: { t: Date.now() }, timeout: 5000 });
+                    const allOrders = ordersRes.data || [];
+                    const found = allOrders.find(o => 
+                        (o.status === 'PENDING_SCAN' || o.status === 'CANCEL_WINDOW') && 
+                        (o.customerName?.includes(senderPhone) || o.userId == senderPhone || o.otpCode === trimmedOtp)
+                    );
+                    if (found) {
+                        activeOrderToRelease = found.orderId;
+                        session.lastOrderId = found.orderId;
+                        if (found.blockLocation) session.blockLocation = found.blockLocation;
                     }
-                } catch (e) {}
+                } catch (e) {
+                    console.error("Error searching orders for OTP:", e.message);
+                }
             }
 
             if (activeOrderToRelease) {
                 try {
-                    const releaseRes = await axios.post(`${BACKEND_BASE}/api/pdf/releasePrint?orderId=${activeOrderToRelease}&otp=${rawText.trim()}`, null, { timeout: 10000 });
+                    const releaseRes = await axios.post(`${BACKEND_BASE}/api/pdf/releasePrint?orderId=${activeOrderToRelease}&otp=${trimmedOtp}`, null, { timeout: 10000 });
                     if (releaseRes.data) {
                         await sock.sendMessage(jid, {
                             text: `✅ *OTP Verified!* 🎉\n\n🖨️ *Print Job Spooling...* Your document is being printed right now at *${session.blockLocation || 'Kiosk'}* printer tray.\n\nReceipt & pickup notification will be sent upon completion!`
                         });
                         session.otpReleased = true;
+                        session.pending = null;
+                        session.step = 'IDLE';
                         saveSessions(sessions);
                         return;
                     }
                 } catch (otpErr) {
+                    const errMsg = otpErr.response?.data?.message || otpErr.response?.data || '';
+                    console.error("OTP Verification Error:", errMsg || otpErr.message);
                     await sock.sendMessage(jid, {
-                        text: `⚠️ *Incorrect OTP!*\n\nPlease look at the *${session.blockLocation || 'Campus Kiosk'} TV Display Screen* to check your 4-digit Release OTP, and reply with the correct code here in WhatsApp.`
+                        text: `⚠️ *Incorrect OTP ("${trimmedOtp}")!*\n\nPlease look at the *${session.blockLocation || 'Campus Kiosk'} TV Display Screen* to check your 4-digit Release OTP, and reply with the correct code here in WhatsApp.`
                     });
                     return;
+                }
+            } else {
+                // If no pending scan order found in session, check if there are ANY pending scan orders matching this OTP
+                try {
+                    const ordersRes = await axios.get(`${BACKEND_BASE}/api/pdf/orders`, { params: { t: Date.now() }, timeout: 5000 });
+                    const allOrders = ordersRes.data || [];
+                    const matchingOtpOrder = allOrders.find(o => 
+                        (o.status === 'PENDING_SCAN' || o.status === 'CANCEL_WINDOW') && 
+                        o.otpCode === trimmedOtp
+                    );
+                    if (matchingOtpOrder) {
+                        const releaseRes = await axios.post(`${BACKEND_BASE}/api/pdf/releasePrint?orderId=${matchingOtpOrder.orderId}&otp=${trimmedOtp}`, null, { timeout: 10000 });
+                        if (releaseRes.data) {
+                            session.lastOrderId = matchingOtpOrder.orderId;
+                            session.blockLocation = matchingOtpOrder.blockLocation || session.blockLocation;
+                            session.otpReleased = true;
+                            session.pending = null;
+                            session.step = 'IDLE';
+                            saveSessions(sessions);
+
+                            await sock.sendMessage(jid, {
+                                text: `✅ *OTP Verified for ${matchingOtpOrder.orderId}!* 🎉\n\n🖨️ *Print Job Spooling...* Your document is being printed right now at *${matchingOtpOrder.blockLocation || 'Kiosk'}* printer tray.\n\nReceipt & pickup notification will be sent upon completion!`
+                            });
+                            return;
+                        }
+                    }
+                } catch (e) {
+                    console.error("Fallback OTP lookup error:", e.message);
                 }
             }
         }

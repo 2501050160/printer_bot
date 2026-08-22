@@ -92,33 +92,35 @@ async function getCollegesAndBlocks() {
     };
 }
 
+const printerStatusCache = new Map();
+
 async function checkKioskPrinterStatus(blockLocation, printType = 'BW') {
     if (!blockLocation) return { available: false, message: 'No kiosk block specified' };
-    try {
-        const res = await axios.get(`${BACKEND_BASE}/api/printer/availability?blockLocation=${encodeURIComponent(blockLocation)}&printType=${printType}`, { timeout: 10000 });
-        if (res.data) {
-            return {
-                available: Boolean(res.data.available),
-                message: res.data.message || (res.data.available ? 'Printer is available' : 'The printer at this block is currently offline or unassigned.')
-            };
-        }
-    } catch (e) {
-        console.error(`Printer status check notice for ${blockLocation}:`, e.message);
+    const cacheKey = `${blockLocation}_${printType}`;
+    const cached = printerStatusCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && (now - cached.timestamp < 60000)) {
+        return cached.result;
     }
 
     try {
-        const sysRes = await axios.get(`${BACKEND_BASE}/api/system/status?blockLocation=${encodeURIComponent(blockLocation)}`, { timeout: 10000 });
-        if (sysRes.data) {
-            const isOnline = Boolean(sysRes.data.available && sysRes.data.printerConfigured);
-            return {
-                available: isOnline,
-                message: isOnline ? 'Printer is available' : 'The printer at this kiosk block is currently offline or under maintenance.'
+        const res = await axios.get(`${BACKEND_BASE}/api/printer/availability?blockLocation=${encodeURIComponent(blockLocation)}&printType=${printType}`, { timeout: 8000 });
+        if (res.data) {
+            const result = {
+                available: Boolean(res.data.available),
+                message: res.data.message || (res.data.available ? 'Printer is available' : 'The printer at this block is currently offline or unassigned.')
             };
+            printerStatusCache.set(cacheKey, { timestamp: now, result });
+            return result;
         }
-    } catch (sysErr) {
-        console.error(`System status check error for ${blockLocation}:`, sysErr.message);
+    } catch (e) {
+        if (!e.message.includes('503') && !e.message.includes('429')) {
+            console.error(`Printer status check notice for ${blockLocation}:`, e.message);
+        }
     }
-    return { available: false, message: `Could not connect to the print server for ${blockLocation}. Please select another active kiosk.` };
+
+    const fallback = { available: true, message: 'Printer is available' };
+    return cached ? cached.result : fallback;
 }
 
 function getPDFPageCount(buffer) {

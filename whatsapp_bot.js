@@ -988,6 +988,14 @@ async function handleIncomingMessage(msg) {
 
             const totalPages = (mimetype.includes('pdf') && !isImage) ? getPDFPageCount(buffer) : 1;
 
+            const caption = (docMsg?.caption || imgMsg?.caption || rawText || '').trim();
+            const copyMatch = caption.match(/\b(\d+)\s*(?:copies|copy|sets|set|nos|times|prints|print)\b/i);
+            let initialCopies = 1;
+            if (copyMatch) {
+                const parsed = parseInt(copyMatch[1], 10);
+                if (parsed >= 1) initialCopies = parsed;
+            }
+
             session.pending = {
                 filename,
                 mimetype: isImage ? (mimetype.startsWith('image/') ? mimetype : 'image/jpeg') : mimetype,
@@ -997,7 +1005,7 @@ async function handleIncomingMessage(msg) {
                 selectedPages: 'ALL',
                 doubleSided: false,
                 printType: 'BW',
-                copies: 1
+                copies: initialCopies
             };
             session.step = 'SELECT_PRINT_MODE';
             saveSessions(sessions);
@@ -1426,7 +1434,7 @@ async function handleIncomingMessage(msg) {
                     session.step = 'ENTER_COPIES';
                     saveSessions(sessions);
 
-                    await sock.sendMessage(jid, { text: `🔢 *Number of Copies*:\n\nReply with number of copies e.g. *"1"* or *"2"* (default: 1):` });
+                    await sock.sendMessage(jid, { text: `🔢 *Number of Copies*:\n\nReply with any number of copies you need (e.g. *1*, *2*, *5*, *10*, *25*, *50*, *100*, etc.):` });
                     return;
                 } else if (textLower.includes('color') || textLower.includes('colour') || textLower === '2') {
                     const colorCheck = await checkKioskPrinterStatus(session.blockLocation, 'COLOR');
@@ -1441,7 +1449,7 @@ async function handleIncomingMessage(msg) {
                     session.step = 'ENTER_COPIES';
                     saveSessions(sessions);
 
-                    await sock.sendMessage(jid, { text: `🔢 *Number of Copies*:\n\nReply with number of copies e.g. *"1"* or *"2"* (default: 1):` });
+                    await sock.sendMessage(jid, { text: `🔢 *Number of Copies*:\n\nReply with any number of copies you need (e.g. *1*, *2*, *5*, *10*, *25*, *50*, *100*, etc.):` });
                     return;
                 } else {
                     await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with *1* for Black & White (₹2/pg) or *2* for Color (₹5/pg).` });
@@ -1450,10 +1458,10 @@ async function handleIncomingMessage(msg) {
             }
 
             if (session.step === 'ENTER_COPIES') {
-                const isNumeric = /^\d+$/.test(rawText.trim());
-                const c = isNumeric ? parseInt(rawText.trim(), 10) : 0;
-                if (!isNumeric || c < 1 || c > 100) {
-                    await sock.sendMessage(jid, { text: `⚠️ *Invalid Number of Copies ("${rawText}")!*\n\nPlease reply with a valid number between *1* and *100* (e.g. *1* or *2*).` });
+                const match = rawText.match(/\b\d+\b/) || rawText.match(/\d+/);
+                const c = match ? parseInt(match[0], 10) : 0;
+                if (c < 1) {
+                    await sock.sendMessage(jid, { text: `⚠️ *Please reply with a valid number of copies* (e.g. *1*, *2*, *5*, *10*, *20*, *50*, etc.):` });
                     return;
                 }
                 session.pending.copies = c;

@@ -58,7 +58,10 @@ async function processBlock(blockConfig) {
     try {
         const nextResponse = await axios.get(
             `${backendUrl}/api/queue/next`,
-            { headers }
+            { 
+                headers,
+                params: { blockLocation }
+            }
         );
 
     const order = nextResponse.data;

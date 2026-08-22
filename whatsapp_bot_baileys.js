@@ -564,13 +564,13 @@ async function startBot() {
                         const orderId = resData.orderId || 'ORD2026';
                         const paymentUrl = resData.paymentUrl || `https://printe-frontend.onrender.com/checkout?orderId=${orderId}`;
 
-                        // Message 1: Order Details & 4-Digit Release OTP
+                        // Message 1: Order Details & TV Display Notice
                         let otpMsg = `🖨️ *Cloud Print Order Created!*\n` +
                                      `-----------------------------------\n` +
                                      `📄 *File*: ${session.pending.filename}\n` +
                                      `📊 *Pages*: ${resData.totalPages || 1} | *Type*: ${session.pending.printType}\n` +
                                      `💰 *Total Amount*: ₹${(resData.estimatedTotal || session.pending.estimatedTotal).toFixed(2)}\n` +
-                                     `🔐 *Your 4-Digit Release OTP*: *${otp}*\n` +
+                                     `📺 *Release OTP*: Displayed on *${session.blockLocation} TV Display Screen*\n` +
                                      `📍 *Target Kiosk*: ${session.blockLocation}`;
 
                         await sock.sendMessage(from, { text: otpMsg });
@@ -981,13 +981,13 @@ async function startBot() {
                         const orderId = resData.orderId || 'ORD2026';
                         const paymentUrl = resData.paymentUrl || `http://localhost:5173/checkout?orderId=${orderId}`;
 
-                        // Message 1: Order Details & 4-Digit Release OTP
+                        // Message 1: Order Details & TV Display Notice
                         let otpMsg = `🖨️ *Cloud Print Order Created!*\n` +
                                      `-----------------------------------\n` +
                                      `📄 *File*: ${session.pending.filename}\n` +
                                      `📊 *Pages*: ${resData.totalPages || 1} | *Type*: ${session.pending.printType}\n` +
                                      `💰 *Total Amount*: ₹${(resData.estimatedTotal || session.pending.estimatedTotal).toFixed(2)}\n` +
-                                     `🔐 *Your 4-Digit Release OTP*: *${otp}*\n` +
+                                     `📺 *Release OTP*: Displayed on *${session.blockLocation} TV Display Screen*\n` +
                                      `📍 *Target Kiosk*: ${session.blockLocation}`;
 
                         await sock.sendMessage(from, { text: otpMsg });

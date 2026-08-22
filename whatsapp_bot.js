@@ -1380,13 +1380,17 @@ async function handleIncomingMessage(msg) {
                     const estimatedTotal = pageCount * rate;
                     session.pending.estimatedTotal = estimatedTotal;
 
-                    let userBalance = 0.0;
+                    let userBalance = session.walletBalance || 0.0;
                     try {
-                        const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 4000 });
+                        const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 10000 });
                         if (balRes.data && balRes.data.balance !== undefined) {
                             userBalance = parseFloat(balRes.data.balance) || 0.0;
+                            session.walletBalance = userBalance;
+                            saveSessions(sessions);
                         }
-                    } catch (e) {}
+                    } catch (e) {
+                        console.error("user-balance fetch error in Quick Print:", e.message);
+                    }
 
                     const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
                         `📄 File: *${session.pending.filename}*\n` +
@@ -1418,13 +1422,17 @@ async function handleIncomingMessage(msg) {
                     const estimatedTotal = 5.0;
                     session.pending.estimatedTotal = estimatedTotal;
 
-                    let userBalance = 0.0;
+                    let userBalance = session.walletBalance || 0.0;
                     try {
-                        const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 4000 });
+                        const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 10000 });
                         if (balRes.data && balRes.data.balance !== undefined) {
                             userBalance = parseFloat(balRes.data.balance) || 0.0;
+                            session.walletBalance = userBalance;
+                            saveSessions(sessions);
                         }
-                    } catch (e) {}
+                    } catch (e) {
+                        console.error("user-balance fetch error in Color Print:", e.message);
+                    }
 
                     const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
                         `📄 File: *${session.pending.filename}*\n` +

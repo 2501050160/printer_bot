@@ -29,6 +29,9 @@ const path = require('path');
 const axios = require('axios');
 const FormData = require('form-data');
 
+axios.defaults.headers.common['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+axios.defaults.headers.common['Accept'] = 'application/json, text/plain, */*';
+
 const BACKEND_URL = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
 const BACKEND_BASE = process.env.BACKEND_BASE_URL || 'https://printer-backend-kgzp.onrender.com';
 const FRONTEND_BASE = process.env.FRONTEND_URL || 'https://cloudprint.website';

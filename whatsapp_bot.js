@@ -1713,7 +1713,7 @@ async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
 }
 
 function startOrderMonitoring() {
-    // Check orders on-demand every 15s only for active sessions to conserve Render bandwidth
+    // Check orders every 3s for fast and responsive WhatsApp notifications
     setInterval(async () => {
         try {
             const sessions = loadSessions();
@@ -1725,12 +1725,49 @@ function startOrderMonitoring() {
                 // Only monitor if session has an active, unnotified or pending order
                 if (session.lastOrderId && sock && !session.notifiedCompletion) {
                     try {
-                        const targetJid = session.jid || `${phone}@s.whatsapp.net`;
+                        const targetJid = session.jid || (phone.endsWith('@s.whatsapp.net') ? phone : `${phone}@s.whatsapp.net`);
 
-                        // 0. Auto-cancel Unpaid Orders after 3 Minutes (180,000 ms)
-                        if (!session.paymentNotified && session.orderCreatedTimestamp) {
+                        // 1. Fetch current order status from backend first
+                        let data = {};
+                        try {
+                            const res = await axios.get(`${BACKEND_BASE}/api/pdf/details?orderId=${session.lastOrderId}`, { timeout: 5000 });
+                            data = res.data || {};
+                        } catch (err) {
+                            if (err.response?.status === 404) {
+                                console.log(`ℹ️ Order ${session.lastOrderId} not found on backend (404). Clearing stale order.`);
+                                session.lastOrderId = null;
+                                session.lastOtp = null;
+                                updated = true;
+                                continue;
+                            }
+                        }
+
+                        const isPaid = (data.paymentStatus === 'PAID' || data.status === 'PAID' || data.status === 'CANCEL_WINDOW' || data.status === 'PENDING_SCAN' || data.status === 'QUEUE' || data.status === 'PRINTING' || data.status === 'COMPLETED');
+
+                        // 2. Post-Payment Confirmation Notice with Exact Expiry Time
+                        if (isPaid && !session.paymentNotified) {
+                            const expiryDate = new Date(nowMs + 10 * 60 * 1000);
+                            const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+
+                            const userOtp = data.otpCode || session.lastOtp || '';
+                            const msgText = `✅ *Payment Confirmed for Order ${session.lastOrderId}!* 🎉\n\n` +
+                                            `📍 *Target Kiosk*: *${session.blockLocation || data.blockLocation || 'Campus Kiosk'}*\n` +
+                                            (userOtp ? `🔐 *Your 4-Digit Release OTP*: *${userOtp}*\n` : '') +
+                                            `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
+                                            `👉 *Whenever you are near the ${session.blockLocation || data.blockLocation || 'Campus Kiosk'} printer, simply reply with your 4-digit OTP (*${userOtp}*) right here in WhatsApp* to release your print directly to the printer tray!`;
+
+                            await sock.sendMessage(targetJid, { text: msgText });
+                            session.paymentNotified = true;
+                            if (userOtp) session.lastOtp = userOtp;
+                            session.paidTimestamp = nowMs;
+                            session.lastReminderTimestamp = nowMs;
+                            updated = true;
+                        }
+
+                        // 3. Auto-cancel Unpaid Orders only if NOT paid after 5 Minutes (300,000 ms)
+                        if (!isPaid && !session.paymentNotified && session.orderCreatedTimestamp) {
                             const unpaidElapsed = nowMs - session.orderCreatedTimestamp;
-                            if (unpaidElapsed >= 180000) { // 3 minutes
+                            if (unpaidElapsed >= 300000) { // 5 minutes
                                 try {
                                     await axios.post(`${BACKEND_BASE}/api/pdf/cancel`, null, {
                                         params: { orderId: session.lastOrderId }
@@ -1738,7 +1775,7 @@ function startOrderMonitoring() {
                                 } catch (e) {}
 
                                 const timeoutMsg = `❌ *Order ${session.lastOrderId} Cancelled (Payment Timeout)*\n\n` +
-                                                   `Your print order was automatically cancelled because payment was not confirmed within 3 minutes.\n\n` +
+                                                   `Your print order was automatically cancelled because payment was not confirmed within 5 minutes.\n\n` +
                                                    `📄 *Need to print?* Simply attach and send your document again to create a new order anytime!`;
 
                                 await sock.sendMessage(targetJid, { text: timeoutMsg });
@@ -1752,30 +1789,7 @@ function startOrderMonitoring() {
                             }
                         }
 
-                        const res = await axios.get(`${BACKEND_BASE}/api/pdf/details?orderId=${session.lastOrderId}`, { timeout: 5000 });
-                        const data = res.data || {};
-
-                        // 1. Post-Payment Confirmation Notice with Exact Expiry Time
-                        if ((data.paymentStatus === 'PAID' || data.status === 'PAID' || data.status === 'CANCEL_WINDOW' || data.status === 'PENDING_SCAN') && !session.paymentNotified) {
-                            const expiryDate = new Date(nowMs + 10 * 60 * 1000);
-                            const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
-
-                            const userOtp = data.otpCode || session.lastOtp || '';
-                            const msgText = `✅ *Payment Confirmed for Order ${session.lastOrderId}!* 🎉\n\n` +
-                                            `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
-                                            (userOtp ? `🔐 *Your 4-Digit Release OTP*: *${userOtp}*\n` : '') +
-                                            `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
-                                            `👉 *Whenever you are near the ${session.blockLocation || 'Campus Kiosk'} printer, simply reply with your 4-digit OTP (*${userOtp}*) right here in WhatsApp* to release your print directly to the printer tray!`;
-
-                            await sock.sendMessage(targetJid, { text: msgText });
-                            session.paymentNotified = true;
-                            if (userOtp) session.lastOtp = userOtp;
-                            session.paidTimestamp = nowMs;
-                            session.lastReminderTimestamp = nowMs;
-                            updated = true;
-                        }
-
-                        // 2. Periodic 2-Minute Expiry Reminder
+                        // 4. Periodic 2-Minute Expiry Reminder
                         if ((data.status === 'PENDING_SCAN' || data.status === 'CANCEL_WINDOW' || data.status === 'PAID') && session.paymentNotified && !session.otpReleased) {
                             const lastReminder = session.lastReminderTimestamp || session.paidTimestamp || 0;
                             const timeSincePaid = nowMs - (session.paidTimestamp || nowMs);

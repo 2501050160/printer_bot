@@ -602,7 +602,7 @@ async function processOrderCreationAndPayment(sock, jid, session, senderName, se
 
     const orderId = resData.orderId || 'ORD2026';
     const userOtp = resData.otp || '';
-    const expiryDate = new Date(Date.now() + 15 * 60 * 1000);
+    const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
     const expiryTimeStr = expiryDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
 
     if (resData.paidViaWallet) {
@@ -612,7 +612,7 @@ async function processOrderCreationAndPayment(sock, jid, session, senderName, se
                         `💳 *Remaining Wallet Balance*: *₹${(resData.newBalance || 0.0).toFixed(2)}*\n` +
                         `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
                         `📺 *Release OTP*: Look at the *${session.blockLocation || 'Campus Kiosk'} TV Display Screen* for your 4-digit OTP\n` +
-                        `⏳ *OTP Validity*: *15 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
+                        `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
                         `👉 *Once you see your 4-digit code on the TV screen, reply with it here in WhatsApp to release your print!*`;
 
         await sock.sendMessage(jid, { text: paidMsg });
@@ -1717,7 +1717,7 @@ function startOrderMonitoring() {
                             const msgText = `✅ *Payment Confirmed for Order ${session.lastOrderId}!* 🎉\n\n` +
                                             `📍 *Target Kiosk*: *${session.blockLocation || data.blockLocation || 'Campus Kiosk'}*\n` +
                                             `📺 *Release OTP*: Look at the *Kiosk TV Display Screen* at *${session.blockLocation || data.blockLocation || 'Campus Kiosk'}* to find your 4-digit code!\n` +
-                                            `⏳ *OTP Validity*: *15 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
+                                            `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
                                             `👉 *Whenever you are near the ${session.blockLocation || data.blockLocation || 'Campus Kiosk'} printer, look at the TV screen for your 4-digit code and reply with it here in WhatsApp* to release your print directly to the printer tray!`;
 
                             await sock.sendMessage(targetJid, { text: msgText });

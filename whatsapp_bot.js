@@ -577,7 +577,8 @@ async function sendSmartMenu(sock, targetJid, title, bodyText, footerText, butto
     }
 }
 
-async function processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal) {
+async function processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal, sessionsInput) {
+    const sessions = sessionsInput || loadSessions();
     await sock.sendMessage(jid, { text: "⏳ *Processing your order with print kiosk server...*" });
 
     let resData;
@@ -1404,7 +1405,7 @@ async function handleIncomingMessage(msg) {
 
                     await sock.sendMessage(jid, { text: summaryText });
 
-                    await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal);
+                    await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal, sessions);
                     return;
                 } else if (session.pending.isImage && (textLower.includes('color') || textLower.includes('colour') || textLower === '2')) {
                     const colorCheck = await checkKioskPrinterStatus(session.blockLocation, 'COLOR');
@@ -1445,7 +1446,7 @@ async function handleIncomingMessage(msg) {
 
                     await sock.sendMessage(jid, { text: summaryText });
 
-                    await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal);
+                    await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal, sessions);
                     return;
                 } else if (session.pending.isImage && (textLower.includes('custom') || textLower.includes('cop') || textLower === '3')) {
                     // Images have no page range or duplex mode: skip directly to Color selection
@@ -1664,7 +1665,7 @@ async function handleIncomingMessage(msg) {
                     return;
                 }
 
-                await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, totalAmt);
+                await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, totalAmt, sessions);
                 return;
             }
         }

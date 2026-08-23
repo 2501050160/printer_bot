@@ -975,46 +975,88 @@ async function handleIncomingMessage(msg) {
             }
         }
 
-        // Check for Coupon Redemption e.g. "COUPON 123456", "REDEEM 123456", or 6-digit code e.g. "123456"
-        const couponMatch = rawText.match(/^(?:coupon|redeem)\s*([a-zA-Z0-9]+)$/i) || (/^\d{6}$/.test(rawText.trim()) ? [null, rawText.trim()] : null);
-        if (couponMatch) {
-            const codeToRedeem = couponMatch[1] || rawText.trim();
-            try {
-                const redeemRes = await axios.post(`${BACKEND_BASE}/api/bot/redeem-coupon?phoneNumber=${senderPhone}&couponCode=${codeToRedeem}`, null, { timeout: 8000 });
-                const rData = redeemRes.data || {};
-                if (rData.success) {
-                    const couponSuccessMsg = `🎉 *Coupon Redeemed Successfully!* 🎟️\n` +
-                                             `-----------------------------------\n` +
-                                             `💰 *Amount Credited*: *₹${(rData.creditedAmount || 0.0).toFixed(2)}*\n` +
-                                             `💳 *Your New Wallet Balance*: *₹${(rData.newBalance || 0.0).toFixed(2)}*\n\n` +
-                                             `💡 Whenever you print, your wallet balance can be used for instant 1-click payment!`;
-                    await sock.sendMessage(jid, { text: couponSuccessMsg });
-                    return;
-                } else {
-                    await sock.sendMessage(jid, { text: `⚠️ *Coupon Redemption Failed*: ${rData.message || 'Invalid code'}` });
-                    return;
-                }
-            } catch (cErr) {
-                console.error("Coupon redemption error:", cErr.message);
-                await sock.sendMessage(jid, { text: "⚠️ Could not redeem coupon right now. Please try again." });
-                return;
-            }
-        }
+        // 1. Check for Wallet / Balance Inquiry e.g. "balance", "wallet", "my balance", "bal", "check wallet"
+        const isBalanceCheck = (
+            textLower === 'balance' ||
+            textLower === 'wallet' ||
+            textLower === 'my balance' ||
+            textLower === 'my wallet' ||
+            textLower === 'check balance' ||
+            textLower === 'check wallet' ||
+            textLower === 'view balance' ||
+            textLower === 'view wallet' ||
+            textLower === 'show balance' ||
+            textLower === 'show wallet' ||
+            textLower === 'bal' ||
+            textLower === 'money' ||
+            textLower === '/balance' ||
+            textLower === '/wallet' ||
+            textLower === '/bal'
+        );
 
-        // Check for Wallet / Balance Inquiry e.g. "balance", "wallet", "my balance"
-        if (textLower === 'balance' || textLower === 'wallet' || textLower === 'my balance' || textLower === '/balance' || textLower === '/wallet') {
+        if (isBalanceCheck) {
+            const phoneToQuery = session.realPhoneNumber || session.phoneNumber || senderPhone;
             try {
-                const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 5000 });
+                const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${encodeURIComponent(phoneToQuery)}`, { timeout: 5000 });
                 const userBal = balRes.data?.balance || 0.0;
-                const balMsg = `💳 *Cloud Print WhatsApp Wallet* 😊\n` +
+                const balMsg = `💳 *Cloud Print Student Digital Wallet* 🖨️\n` +
                                `-----------------------------------\n` +
-                               `📱 *Registered Phone*: *${senderPhone}*\n` +
-                               `💰 *Available Balance*: *₹${userBal.toFixed(2)}*\n\n` +
-                               `💡 Send any valid Coupon Code e.g. *"COUPON 123456"* to add funds to your wallet!`;
+                               `📱 *Registered Phone*: *${phoneToQuery}*\n` +
+                               `💰 *Available Wallet Balance*: *₹${userBal.toFixed(2)}*\n` +
+                               `-----------------------------------\n` +
+                               `⚡ *Instant 1-Tap Printing*: Your wallet balance is automatically used for zero-fee, instant print releases at kiosks!\n\n` +
+                               `🎟️ *Have a Coupon or Voucher?*\n` +
+                               `Reply with *COUPON <Code>* or just send your code (e.g. *cupon00000*, *BONUS1208*, or *123456*) to credit funds to your wallet instantly!`;
                 await sock.sendMessage(jid, { text: balMsg });
                 return;
             } catch (bErr) {
                 await sock.sendMessage(jid, { text: `💳 *Wallet Balance*: ₹0.00` });
+                return;
+            }
+        }
+
+        // 2. Check for Coupon / Voucher Redemption
+        // Matches: "coupon 123456", "cupon00000", "cupon 00000", "voucher 50", "voture 50", "redeem 123456", "BONUS1208", "SAVE1302", "123456", "00000"
+        let couponCodeFound = null;
+
+        const couponPrefixMatch = rawText.match(/^(?:coupon|cupon|copon|voucher|voture|redeem|claim|promo|code|apply|use)\s*[:=-]?\s*([a-zA-Z0-9_-]+)$/i);
+        if (couponPrefixMatch) {
+            couponCodeFound = couponPrefixMatch[1];
+        } else if (/^(?:coupon|cupon|copon|voucher|voture|redeem|claim|promo)[a-zA-Z0-9_-]+$/i.test(rawText)) {
+            couponCodeFound = rawText; // e.g. cupon00000, coupon00000, voucher123
+        } else if (/^[A-Za-z]{2,6}\d{2,6}$/.test(rawText)) {
+            // e.g. BONUS1208, SAVE1302, CP50, CP1234
+            couponCodeFound = rawText;
+        } else if (/^\d{5,8}$/.test(rawText)) {
+            // 5-8 digit numeric code (e.g. 00000, 123456, 880996) - 4-digit is reserved for Kiosk OTP
+            couponCodeFound = rawText;
+        }
+
+        if (couponCodeFound && session.step !== 'CONFIRM_ORDER' && session.step !== 'SELECT_BLOCK') {
+            const phoneToRedeem = session.realPhoneNumber || session.phoneNumber || senderPhone;
+            try {
+                const redeemRes = await axios.post(
+                    `${BACKEND_BASE}/api/bot/redeem-coupon?phoneNumber=${encodeURIComponent(phoneToRedeem)}&couponCode=${encodeURIComponent(couponCodeFound)}`,
+                    null,
+                    { timeout: 8000 }
+                );
+                const rData = redeemRes.data || {};
+                if (rData.success) {
+                    const couponSuccessMsg = `🎉 *Voucher / Coupon Applied Successfully!* 🎟️\n` +
+                                             `-----------------------------------\n` +
+                                             `💰 *Cash Credited*: *₹${(rData.creditedAmount || 0.0).toFixed(2)}*\n` +
+                                             `💳 *Updated Wallet Balance*: *₹${(rData.newBalance || 0.0).toFixed(2)}*\n` +
+                                             `-----------------------------------\n` +
+                                             `💡 You can now use your wallet balance for instant 1-click print orders anytime!`;
+                    await sock.sendMessage(jid, { text: couponSuccessMsg });
+                    return;
+                } else {
+                    await sock.sendMessage(jid, { text: `⚠️ *Voucher Redemption Failed*: ${rData.message || 'Invalid or expired code.'}` });
+                    return;
+                }
+            } catch (cErr) {
+                console.error("Coupon redemption error:", cErr.message);
+                await sock.sendMessage(jid, { text: "⚠️ Could not redeem voucher right now. Please try again or contact support." });
                 return;
             }
         }

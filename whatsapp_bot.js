@@ -1437,31 +1437,66 @@ async function handleIncomingMessage(msg) {
             session.step = 'SELECT_PRINT_MODE';
             saveSessions(sessions);
 
+            const colorCheck = await checkKioskPrinterStatus(session.blockLocation, 'COLOR');
+            const isColorSupported = Boolean(colorCheck && colorCheck.available);
+            session.pending.isColorSupported = isColorSupported;
+
             if (isImage) {
-                await sendSmartMenu(
-                    sock,
-                    jid,
-                    `🖼️ Photo Received: ${filename}`,
-                    `📷 *Photo / Image (1 Page)*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print this photo?`,
-                    'Select Print Option',
-                    [
-                        '⚡ Quick Print (B&W • 1 Copy • ₹2)',
-                        '🎨 Print in Color (₹5)',
-                        '⚙️ Customize Color & Copies'
-                    ]
-                );
+                if (isColorSupported) {
+                    await sendSmartMenu(
+                        sock,
+                        jid,
+                        `🖼️ Photo Received: ${filename}`,
+                        `📷 *Photo / Image (1 Page)*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print this photo?`,
+                        'Select Print Option',
+                        [
+                            '📄 Single Sided B&W Print (₹2.00)',
+                            '🎨 Color Print (₹5.00)',
+                            '⚙️ Customize Copies & Settings'
+                        ]
+                    );
+                } else {
+                    await sendSmartMenu(
+                        sock,
+                        jid,
+                        `🖼️ Photo Received: ${filename}`,
+                        `📷 *Photo / Image (1 Page)*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print this photo?`,
+                        'Select Print Option',
+                        [
+                            '📄 Single Sided B&W Print (₹2.00)',
+                            '⚙️ Customize Copies & Settings'
+                        ]
+                    );
+                }
             } else {
-                await sendSmartMenu(
-                    sock,
-                    jid,
-                    `📄 Document Received: ${filename}`,
-                    `📊 Total Pages Detected: *${totalPages}*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print?`,
-                    'Select Print Mode',
-                    [
-                        '⚡ Quick Print (All Pages, Single Sided, B&W)',
-                        '⚙️ Customize Print Settings'
-                    ]
-                );
+                if (isColorSupported) {
+                    await sendSmartMenu(
+                        sock,
+                        jid,
+                        `📄 Document Received: ${filename}`,
+                        `📊 Total Pages Detected: *${totalPages}*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print?`,
+                        'Select Print Mode',
+                        [
+                            '📄 Single Sided Black & White Print (₹2/pg)',
+                            '📑 Double Sided Black & White Print (₹1.50/pg)',
+                            '🎨 Color Print (₹5/pg)',
+                            '⚙️ Customize Section (Custom Pages, Copies, etc.)'
+                        ]
+                    );
+                } else {
+                    await sendSmartMenu(
+                        sock,
+                        jid,
+                        `📄 Document Received: ${filename}`,
+                        `📊 Total Pages Detected: *${totalPages}*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print?`,
+                        'Select Print Mode',
+                        [
+                            '📄 Single Sided Black & White Print (₹2/pg)',
+                            '📑 Double Sided Black & White Print (₹1.50/pg)',
+                            '⚙️ Customize Section (Custom Pages, Copies, etc.)'
+                        ]
+                    );
+                }
             }
             return;
         }
@@ -1493,7 +1528,10 @@ async function handleIncomingMessage(msg) {
                     return;
                 }
 
-                if (textLower.includes('quick') || textLower === '1') {
+                const isColorSupported = Boolean(session.pending.isColorSupported);
+
+                // Option 1: Single Sided Black & White Print (All Pages)
+                if (textLower.includes('single') || textLower === '1') {
                     session.pending.selectedPages = 'ALL';
                     session.pending.doubleSided = false;
                     session.pending.printType = 'BW';
@@ -1513,7 +1551,7 @@ async function handleIncomingMessage(msg) {
                             saveSessions(sessions);
                         }
                     } catch (e) {
-                        console.error("user-balance fetch error in Quick Print:", e.message);
+                        console.error("user-balance fetch error in Single Sided B&W Print:", e.message);
                     }
 
                     const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
@@ -1527,23 +1565,68 @@ async function handleIncomingMessage(msg) {
                         `💳 Wallet Balance: *₹${userBalance.toFixed(2)}*`;
 
                     await sock.sendMessage(jid, { text: summaryText });
-
                     await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal, sessions);
                     return;
-                } else if (session.pending.isImage && (textLower.includes('color') || textLower.includes('colour') || textLower === '2')) {
-                    const colorCheck = await checkKioskPrinterStatus(session.blockLocation, 'COLOR');
-                    if (!colorCheck.available) {
-                        await sock.sendMessage(jid, {
-                            text: `⚠️ *Color Printing Unavailable*:\n${colorCheck.message}\n\nPlease choose *1* for Black & White (₹2), or select a different option:`
-                        });
+                }
+
+                // Option 2: Double Sided (Duplex) Black & White Print (All Pages)
+                if ((!session.pending.isImage && (textLower.includes('double') || textLower.includes('both') || textLower.includes('duplex') || textLower === '2')) ||
+                    (session.pending.isImage && !isColorSupported && (textLower.includes('custom') || textLower === '2')) ||
+                    (session.pending.isImage && isColorSupported && (textLower.includes('color') || textLower === '2'))) {
+                    
+                    if (session.pending.isImage && isColorSupported && (textLower.includes('color') || textLower === '2')) {
+                        // Image Color Print
+                        session.pending.selectedPages = 'ALL';
+                        session.pending.doubleSided = false;
+                        session.pending.printType = 'COLOR';
+                        session.pending.copies = 1;
+                        const estimatedTotal = 5.0;
+                        session.pending.estimatedTotal = estimatedTotal;
+
+                        let userBalance = session.walletBalance || 0.0;
+                        try {
+                            const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 10000 });
+                            if (balRes.data && balRes.data.balance !== undefined) {
+                                userBalance = parseFloat(balRes.data.balance) || 0.0;
+                                session.walletBalance = userBalance;
+                                saveSessions(sessions);
+                            }
+                        } catch (e) {}
+
+                        const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
+                            `📄 File: *${session.pending.filename}*\n` +
+                            `🖼️ Type: *Photo / Image (1 Page)*\n` +
+                            `🎨 Mode: *Color (₹5.00)*\n` +
+                            `🔢 Copies: *1*\n` +
+                            `📍 Kiosk: *${session.blockLocation}* (${session.college})\n` +
+                            `💰 Total Amount: *₹${estimatedTotal.toFixed(2)}*\n` +
+                            `💳 Wallet Balance: *₹${userBalance.toFixed(2)}*`;
+
+                        await sock.sendMessage(jid, { text: summaryText });
+                        await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal, sessions);
                         return;
                     }
+
+                    if (session.pending.isImage && !isColorSupported) {
+                        // Image customize
+                        session.pending.selectedPages = 'ALL';
+                        session.pending.doubleSided = false;
+                        session.step = 'ENTER_COPIES';
+                        saveSessions(sessions);
+                        await sock.sendMessage(jid, { text: `🔢 *Number of Copies*:\n\nReply with the number of copies you need (e.g. *1*, *2*, *5*, *10*):` });
+                        return;
+                    }
+
+                    // Document Double Sided B&W Print
                     session.pending.selectedPages = 'ALL';
-                    session.pending.doubleSided = false;
-                    session.pending.printType = 'COLOR';
+                    session.pending.doubleSided = true;
+                    session.pending.printType = 'BW';
                     session.pending.copies = 1;
 
-                    const estimatedTotal = 5.0;
+                    const totalPgs = session.pending.totalPages || 1;
+                    const sheets = Math.ceil(totalPgs / 2.0);
+                    const rate = 1.50; // ₹1.50 per duplex page / sheet
+                    const estimatedTotal = totalPgs === 1 ? 2.00 : sheets * rate;
                     session.pending.estimatedTotal = estimatedTotal;
 
                     let userBalance = session.walletBalance || 0.0;
@@ -1555,41 +1638,84 @@ async function handleIncomingMessage(msg) {
                             saveSessions(sessions);
                         }
                     } catch (e) {
-                        console.error("user-balance fetch error in Color Print:", e.message);
+                        console.error("user-balance fetch error in Double Sided Print:", e.message);
                     }
 
                     const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
                         `📄 File: *${session.pending.filename}*\n` +
-                        `🖼️ Type: *Photo / Image (1 Page)*\n` +
-                        `🎨 Mode: *Color (₹5.00)*\n` +
+                        `📊 Pages: *${totalPgs}* (Range: ALL • ${sheets} Sheets)\n` +
+                        `📑 Sides: *Double Sided (Duplex)*\n` +
+                        `🎨 Mode: *Black & White (₹1.50/pg)*\n` +
                         `🔢 Copies: *1*\n` +
                         `📍 Kiosk: *${session.blockLocation}* (${session.college})\n` +
                         `💰 Total Amount: *₹${estimatedTotal.toFixed(2)}*\n` +
                         `💳 Wallet Balance: *₹${userBalance.toFixed(2)}*`;
 
                     await sock.sendMessage(jid, { text: summaryText });
-
                     await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal, sessions);
                     return;
-                } else if (session.pending.isImage && (textLower.includes('custom') || textLower.includes('cop') || textLower === '3')) {
-                    // Images have no page range or duplex mode: skip directly to Color selection
+                }
+
+                // Option 3 (Color Print when supported)
+                if (isColorSupported && (textLower.includes('color') || textLower.includes('colour') || textLower === '3')) {
+                    const colorCheck = await checkKioskPrinterStatus(session.blockLocation, 'COLOR');
+                    if (!colorCheck.available) {
+                        await sock.sendMessage(jid, {
+                            text: `⚠️ *Color Printing Unavailable*:\n${colorCheck.message}\n\nPlease choose *1* for Single Sided B&W (₹2) or *2* for Double Sided B&W:`
+                        });
+                        return;
+                    }
                     session.pending.selectedPages = 'ALL';
                     session.pending.doubleSided = false;
-                    session.step = 'SELECT_COLOR';
-                    saveSessions(sessions);
+                    session.pending.printType = 'COLOR';
+                    session.pending.copies = 1;
 
-                    await sendSmartMenu(
-                        sock,
-                        jid,
-                        '🎨 Select Print Color Mode',
-                        'Please choose your print color mode below:',
-                        'Select Color Mode',
-                        ['⚫ Black & White (₹2/pg)', '🎨 Color (₹5/pg)']
-                    );
+                    const pageCount = countPagesFromRange('ALL', session.pending.totalPages);
+                    const rate = 5.0;
+                    const estimatedTotal = pageCount * rate;
+                    session.pending.estimatedTotal = estimatedTotal;
+
+                    let userBalance = session.walletBalance || 0.0;
+                    try {
+                        const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 10000 });
+                        if (balRes.data && balRes.data.balance !== undefined) {
+                            userBalance = parseFloat(balRes.data.balance) || 0.0;
+                            session.walletBalance = userBalance;
+                            saveSessions(sessions);
+                        }
+                    } catch (e) {}
+
+                    const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
+                        `📄 File: *${session.pending.filename}*\n` +
+                        `📊 Pages: *${pageCount}* (Range: ALL)\n` +
+                        `📑 Sides: *Single Sided*\n` +
+                        `🎨 Mode: *Color (₹5/pg)*\n` +
+                        `🔢 Copies: *1*\n` +
+                        `📍 Kiosk: *${session.blockLocation}* (${session.college})\n` +
+                        `💰 Total Amount: *₹${estimatedTotal.toFixed(2)}*\n` +
+                        `💳 Wallet Balance: *₹${userBalance.toFixed(2)}*`;
+
+                    await sock.sendMessage(jid, { text: summaryText });
+                    await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal, sessions);
                     return;
-                } else if (!session.pending.isImage && (textLower.includes('custom') || textLower === '2')) {
+                }
+
+                // Customize Section (Option 3 for B&W-only, or Option 4 for Color-enabled, or text 'custom')
+                const isCustomizeChoice = (!isColorSupported && (textLower.includes('custom') || textLower === '3')) ||
+                                         (isColorSupported && (textLower.includes('custom') || textLower === '4')) ||
+                                         textLower.includes('custom');
+
+                if (isCustomizeChoice) {
+                    if (session.pending.isImage) {
+                        session.pending.selectedPages = 'ALL';
+                        session.pending.doubleSided = false;
+                        session.step = 'ENTER_COPIES';
+                        saveSessions(sessions);
+                        await sock.sendMessage(jid, { text: `🔢 *Number of Copies*:\n\nReply with any number of copies you need (e.g. *1*, *2*, *5*, *10*, *25*, etc.):` });
+                        return;
+                    }
+
                     if (session.pending.totalPages === 1) {
-                        // 1-page PDF has no custom page range: skip to Print Sides selection
                         session.pending.selectedPages = 'ALL';
                         session.step = 'SELECT_SIDES';
                         saveSessions(sessions);
@@ -1600,7 +1726,7 @@ async function handleIncomingMessage(msg) {
                             '📑 Print Sides (Single vs Duplex)',
                             'Please choose print side orientation:',
                             'Select Print Sides',
-                            ['📄 Single Sided (Rs. 2/page)', '📑 Both Sides / Duplex (Rs. 2/paper)']
+                            ['📄 Single Sided (Rs. 2/page)', '📑 Both Sides / Duplex (Rs. 1.50/page)']
                         );
                         return;
                     } else {
@@ -1617,14 +1743,15 @@ async function handleIncomingMessage(msg) {
                         );
                         return;
                     }
-                } else {
-                    if (session.pending.isImage) {
-                        await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with:\n• *1* for Quick B&W Print (₹2)\n• *2* for Quick Color Print (₹5)\n• *3* to Customize Color & Copies` });
-                    } else {
-                        await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with *1* for Quick Print or *2* for Customize Print Settings.` });
-                    }
-                    return;
                 }
+
+                // Invalid selection
+                if (isColorSupported) {
+                    await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with:\n• *1* for Single Sided B&W Print (₹2/pg)\n• *2* for Double Sided B&W Print (₹1.50/pg)\n• *3* for Color Print (₹5/pg)\n• *4* for Customize Section` });
+                } else {
+                    await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with:\n• *1* for Single Sided B&W Print (₹2/pg)\n• *2* for Double Sided B&W Print (₹1.50/pg)\n• *3* for Customize Section` });
+                }
+                return;
             }
 
             if (session.step === 'SELECT_PAGE_OPTION') {
@@ -2039,6 +2166,32 @@ function startOrderMonitoring() {
                     }
                 }
             }
+
+            // 5. Poll Hardware & Paper Level Alerts and Dispatch to Admin WhatsApp (+91 9494189664)
+            try {
+                const alertsRes = await axios.get(`${BACKEND_BASE}/api/alerts/pending`, { timeout: 6000 });
+                if (alertsRes.data && Array.isArray(alertsRes.data) && alertsRes.data.length > 0) {
+                    const adminJid = '919494189664@s.whatsapp.net';
+                    const agentJid = '918688500278@s.whatsapp.net';
+                    for (const alert of alertsRes.data) {
+                        const alertMsg = alert.message || `🚨 *CLOUD PRINT KIOSK ALERT*\n━━━━━━━━━━━━━━━━━━━━━━\n📍 *Location*: ${alert.blockLocation || 'Campus Kiosk'}\n⚠️ *Status*: *${alert.alertType || 'ALERT'}*\n📝 *Details*: ${alert.details || 'Hardware alert'}\n⏱️ *Time*: ${alert.timestamp || new Date().toLocaleString()}`;
+                        try {
+                            await sock.sendMessage(adminJid, { text: alertMsg });
+                            console.log(`📱 Alert delivered to Admin WhatsApp (+91 9494189664): ${alert.alertType}`);
+                        } catch (err) {
+                            console.error("Failed to send alert to Admin:", err.message);
+                        }
+                        try {
+                            await sock.sendMessage(agentJid, { text: alertMsg });
+                        } catch (err) {}
+                        
+                        // Acknowledge alert
+                        if (alert.id) {
+                            await axios.post(`${BACKEND_BASE}/api/alerts/ack?id=${encodeURIComponent(alert.id)}`, null, { timeout: 5000 }).catch(() => {});
+                        }
+                    }
+                }
+            } catch (e) {}
 
             if (updated) saveSessions(sessions);
         } catch (e) {}

@@ -855,6 +855,87 @@ async function handleIncomingMessage(msg) {
         const collegesMap = await getCollegesAndBlocks();
         const collegeList = Object.keys(collegesMap);
 
+        // ==========================================
+        // Handle Post-Print Receipt Request (Replies to "Would you like a receipt?")
+        // ==========================================
+        if (session.step === 'ASK_RECEIPT' || textLower === 'receipt' || textLower === '/receipt' || textLower === 'invoice' || textLower === '/invoice') {
+            const isAffirmative = (
+                textLower === '1' || 
+                textLower === 'yes' || 
+                textLower === 'send receipt' || 
+                textLower === 'receipt' || 
+                textLower === '/receipt' ||
+                textLower === 'invoice' || 
+                textLower === '/invoice' ||
+                textLower === 'bill' ||
+                textLower.includes('receipt')
+            );
+            const isNegative = (
+                textLower === '2' || 
+                textLower === 'no' || 
+                textLower === 'no thank you' || 
+                textLower === 'no thanks' || 
+                textLower === 'done' || 
+                textLower === 'skip'
+            );
+
+            if (session.step === 'ASK_RECEIPT' && isNegative) {
+                await sock.sendMessage(jid, { text: "🥰 *Thank you for using Cloud Print!* Have a wonderful day! 🖨️✨" });
+                session.step = 'IDLE';
+                session.receiptAskTimestamp = null;
+                saveSessions(sessions);
+                return;
+            }
+
+            if (isAffirmative) {
+                const orderData = session.completedOrderData || (session.lastOrderId ? {
+                    orderId: session.lastOrderId,
+                    fileName: 'Document.pdf',
+                    totalPages: session.lastPages || 1,
+                    printType: 'BW',
+                    doubleSided: false,
+                    copies: 1,
+                    price: session.lastPrice || 0,
+                    originalPrice: session.lastPrice || 0,
+                    discountAmount: 0,
+                    blockLocation: session.blockLocation || 'Campus Kiosk',
+                    transactionId: 'WALLET_PAYMENT',
+                    paymentMethod: 'WhatsApp Cloud Print',
+                    paidAt: Date.now()
+                } : null);
+
+                if (orderData) {
+                    await sock.sendMessage(jid, { text: "📄 *Generating your Official PDF Payment Receipt...* Please wait a moment! ⏳" });
+                    try {
+                        const receiptPdfBuffer = await createReceiptPdf(orderData);
+                        await sock.sendMessage(jid, {
+                            document: receiptPdfBuffer,
+                            mimetype: 'application/pdf',
+                            fileName: `CloudPrint_Receipt_${orderData.orderId || 'Order'}.pdf`,
+                            caption: `🧾 *Official Payment Receipt for Order ${orderData.orderId || ''}*\n\nThank you for choosing Cloud Print Self-Service Kiosks! 🖨️✨`
+                        });
+                        session.step = 'IDLE';
+                        session.receiptAskTimestamp = null;
+                        saveSessions(sessions);
+                        return;
+                    } catch (pdfErr) {
+                        console.error("Error generating receipt PDF:", pdfErr);
+                        await sock.sendMessage(jid, { text: "⚠️ Could not generate PDF receipt. Please download from your web dashboard." });
+                        session.step = 'IDLE';
+                        session.receiptAskTimestamp = null;
+                        saveSessions(sessions);
+                        return;
+                    }
+                } else {
+                    await sock.sendMessage(jid, { text: "⚠️ No recent completed order found to generate a receipt." });
+                    session.step = 'IDLE';
+                    session.receiptAskTimestamp = null;
+                    saveSessions(sessions);
+                    return;
+                }
+            }
+        }
+
         // Cancel order command
         if (textLower === 'cancel' || textLower === 'cancel order' || textLower === '/cancel') {
             if (session.lastOrderId) {

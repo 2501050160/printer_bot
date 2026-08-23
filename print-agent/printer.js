@@ -29,8 +29,42 @@ async function printPdf(filePath, options = {}) {
         printOptions.monochrome = !isColor;
     }
 
-    console.log(`[Printer] Spooling PDF: ${path.basename(filePath)} | Printer: ${printOptions.printer || 'System Default'} | Mode: ${printOptions.monochrome ? 'Monochrome (Compact Spool)' : 'Color'} | Copies: ${printOptions.copies}`);
+    if (options.orientation) {
+        const ori = String(options.orientation).toLowerCase().trim();
+        if (ori === "landscape" || ori === "horizontal") {
+            printOptions.orientation = "landscape";
+        } else if (ori === "portrait") {
+            printOptions.orientation = "portrait";
+        }
+    }
+
+    console.log(`[Printer] Spooling PDF: ${path.basename(filePath)} | Printer: ${printOptions.printer || 'System Default'} | Mode: ${printOptions.monochrome ? 'Monochrome' : 'Color'} | Orientation: ${printOptions.orientation || 'portrait'} | Copies: ${printOptions.copies}`);
     await print(filePath, printOptions);
+}
+
+function detectPdfOrientation(filePath) {
+    try {
+        if (!filePath || !fs.existsSync(filePath)) return "portrait";
+        const buffer = fs.readFileSync(filePath);
+        const slice = buffer.subarray(0, Math.min(buffer.length, 250000)).toString("binary");
+        
+        const rotateMatch = slice.match(/\/Rotate\s+(\d+)/);
+        const rotation = rotateMatch ? parseInt(rotateMatch[1], 10) : 0;
+
+        const boxMatch = slice.match(/\/(?:MediaBox|CropBox)\s*\[\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s*\]/);
+        if (boxMatch) {
+            const width = Math.abs(parseFloat(boxMatch[3]) - parseFloat(boxMatch[1]));
+            const height = Math.abs(parseFloat(boxMatch[4]) - parseFloat(boxMatch[2]));
+            
+            if (rotation === 90 || rotation === 270) {
+                return height > width ? "landscape" : "portrait";
+            }
+            return width > height ? "landscape" : "portrait";
+        }
+    } catch (e) {
+        console.warn("[Printer] Orientation detection warning:", e.message);
+    }
+    return "portrait";
 }
 
 async function savePdfBuffer(buffer, orderId) {
@@ -60,5 +94,6 @@ function cleanup(filePath) {
 module.exports = {
     printPdf,
     savePdfBuffer,
-    cleanup
+    cleanup,
+    detectPdfOrientation
 };

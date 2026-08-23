@@ -1,7 +1,7 @@
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
-const { printPdf, savePdfBuffer, cleanup } = require("./printer");
+const { printPdf, savePdfBuffer, cleanup, detectPdfOrientation } = require("./printer");
 
 const configPath = path.join(__dirname, "config.json");
 const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
@@ -100,6 +100,15 @@ async function processBlock(blockConfig) {
 
     const isBw = !order.printType || order.printType.toUpperCase() === "BW" || order.printType.toUpperCase() === "BLACK_AND_WHITE";
 
+    let finalOrientation = "portrait";
+    if (order.orientation && (order.orientation.toLowerCase() === "landscape" || order.orientation.toLowerCase() === "horizontal")) {
+        finalOrientation = "landscape";
+    } else if (order.orientation && order.orientation.toLowerCase() === "portrait") {
+        finalOrientation = "portrait";
+    } else {
+        finalOrientation = detectPdfOrientation(filePath);
+    }
+
     await printPdf(filePath, {
         printerName,
         copies: order.copies || 1,
@@ -107,6 +116,7 @@ async function processBlock(blockConfig) {
         pages: (order.selectedPages && order.selectedPages !== "ALL") ? order.selectedPages : undefined,
         printType: order.printType,
         monochrome: isBw,
+        orientation: finalOrientation,
         paperSize: "A4",
         scale: "fit"
     });

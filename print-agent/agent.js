@@ -98,10 +98,17 @@ async function processBlock(blockConfig) {
 
     const printerName = await resolvePrinterName(blockLocation, order);
 
+    const isBw = !order.printType || order.printType.toUpperCase() === "BW" || order.printType.toUpperCase() === "BLACK_AND_WHITE";
+
     await printPdf(filePath, {
         printerName,
         copies: order.copies || 1,
-        side: order.doubleSided ? "duplexlong" : "simplex"
+        side: order.doubleSided ? "duplexlong" : "simplex",
+        pages: (order.selectedPages && order.selectedPages !== "ALL") ? order.selectedPages : undefined,
+        printType: order.printType,
+        monochrome: isBw,
+        paperSize: "A4",
+        scale: "fit"
     });
 
     cleanup(filePath);

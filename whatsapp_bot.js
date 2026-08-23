@@ -1932,10 +1932,10 @@ async function handleIncomingMessage(msg) {
 async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
     const isImage = Boolean(session.pending.isImage);
     const pageCount = isImage ? 1 : countPagesFromRange(session.pending.selectedPages, session.pending.totalPages);
-    const rate = session.pending.printType === 'COLOR' ? 5.0 : (session.pending.doubleSided ? 2.0 : 2.0);
+    const rate = session.pending.printType === 'COLOR' ? 5.0 : (session.pending.doubleSided ? 1.50 : 2.0);
     const div = session.pending.doubleSided ? 2.0 : 1.0;
     const paperSheets = Math.ceil(pageCount / div);
-    const estimatedTotal = paperSheets * (session.pending.copies || 1) * rate;
+    const estimatedTotal = (session.pending.doubleSided && pageCount === 1) ? 2.00 : paperSheets * (session.pending.copies || 1) * rate;
 
     session.pending.estimatedTotal = estimatedTotal;
 

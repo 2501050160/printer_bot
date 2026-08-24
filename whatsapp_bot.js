@@ -207,6 +207,10 @@ function createUploadFormData(session, senderName, senderPhone) {
     form.append('selectedPages', session.pending.selectedPages || 'ALL');
     form.append('doubleSided', session.pending.doubleSided ? 'true' : 'false');
     form.append('copies', String(session.pending.copies || 1));
+    const activeCoupon = session.pending.couponCode || session.savedDiscountCoupon?.code;
+    if (activeCoupon) {
+        form.append('couponCode', activeCoupon);
+    }
     return form;
 }
 
@@ -464,8 +468,27 @@ async function createReceiptPdf(orderData) {
     drawSectionTitle('TRANSACTION DETAILS');
     drawKeyValue('Order ID:', orderData.orderId || 'ORD2026', true);
     drawKeyValue('Receipt Date:', orderData.paidAt ? new Date(orderData.paidAt).toLocaleString() : new Date().toLocaleString());
-    drawKeyValue('Transaction ID:', orderData.transactionId || (orderData.paymentMethod === 'WALLET' ? 'WALLET_BALANCE' : 'ONLINE_RAZORPAY'));
-    drawKeyValue('Payment Channel:', orderData.paymentMethod || 'WhatsApp Cloud Print');
+
+    const origPrice = Number(orderData.originalPrice != null ? orderData.originalPrice : (orderData.price || 0));
+    const discount = Number(orderData.discountAmount || 0);
+    let finalPrice = Number(orderData.price != null ? orderData.price : Math.max(0, origPrice - discount));
+    if (discount > 0 && finalPrice === origPrice && origPrice > 0) {
+        finalPrice = Math.max(0, origPrice - discount);
+    }
+    const isCouponOrFree = finalPrice <= 0 || (discount >= origPrice && origPrice > 0);
+
+    let txId = orderData.transactionId || 'WALLET';
+    let paymentChannel = orderData.paymentMethod || 'WhatsApp Cloud Print';
+    if (isCouponOrFree) {
+        txId = 'COUPON PAYMENT (₹0.00 PAID)';
+        paymentChannel = 'Coupon / 100% Wallet Discount';
+    } else if (txId === 'WALLET' || txId === 'WALLET_PAYMENT') {
+        txId = 'WALLET_BALANCE';
+        paymentChannel = 'Student Print Wallet';
+    }
+
+    drawKeyValue('Transaction ID:', txId);
+    drawKeyValue('Payment Channel:', paymentChannel);
     drawKeyValue('Collection Kiosk:', orderData.blockLocation || 'C Block Kiosk', true);
 
     currentY -= 8;
@@ -504,20 +527,18 @@ async function createReceiptPdf(orderData) {
         y: boxY,
         width: width - 120,
         height: 85,
-        color: rgb(0.97, 0.98, 1),
-        borderColor: rgb(0.85, 0.90, 0.98),
+        color: isCouponOrFree ? rgb(0.95, 0.99, 0.96) : rgb(0.97, 0.98, 1),
+        borderColor: isCouponOrFree ? rgb(0.75, 0.92, 0.80) : rgb(0.85, 0.90, 0.98),
         borderWidth: 1,
     });
 
-    const origPrice = orderData.originalPrice || orderData.price || 0;
-    const discount = orderData.discountAmount || 0;
-    const finalPrice = orderData.price || origPrice;
+    const displayDiscount = discount > 0 ? discount : (isCouponOrFree ? origPrice : 0);
 
     page.drawText('Original Amount:', { x: 80, y: boxY + 60, size: 10, font: fontRegular, color: mutedTextColor });
     page.drawText(`Rs. ${Number(origPrice).toFixed(2)}`, { x: width - 180, y: boxY + 60, size: 10, font: fontRegular, color: darkTextColor });
 
-    page.drawText('Discount / Wallet Applied:', { x: 80, y: boxY + 40, size: 10, font: fontRegular, color: greenColor });
-    page.drawText(`- Rs. ${Number(discount).toFixed(2)}`, { x: width - 180, y: boxY + 40, size: 10, font: fontBold, color: greenColor });
+    page.drawText(isCouponOrFree ? 'Coupon / Wallet Discount:' : 'Discount / Wallet Applied:', { x: 80, y: boxY + 40, size: 10, font: fontRegular, color: greenColor });
+    page.drawText(`- Rs. ${Number(displayDiscount).toFixed(2)}`, { x: width - 180, y: boxY + 40, size: 10, font: fontBold, color: greenColor });
 
     page.drawLine({
         start: { x: 80, y: boxY + 30 },
@@ -526,8 +547,9 @@ async function createReceiptPdf(orderData) {
         color: rgb(0.8, 0.85, 0.9),
     });
 
-    page.drawText('Total Paid:', { x: 80, y: boxY + 12, size: 12, font: fontBold, color: primaryColor });
-    page.drawText(`Rs. ${Number(finalPrice).toFixed(2)}`, { x: width - 180, y: boxY + 12, size: 13, font: fontBold, color: primaryColor });
+    page.drawText('Total Paid:', { x: 80, y: boxY + 12, size: 12, font: fontBold, color: isCouponOrFree ? greenColor : primaryColor });
+    const totalPaidText = isCouponOrFree ? 'Rs. 0.00 (Coupon Payment)' : `Rs. ${Number(finalPrice).toFixed(2)}`;
+    page.drawText(totalPaidText, { x: width - (isCouponOrFree ? 230 : 180), y: boxY + 12, size: 12, font: fontBold, color: isCouponOrFree ? greenColor : primaryColor });
 
     // Section 4: Footer
     page.drawRectangle({
@@ -882,6 +904,13 @@ async function handleIncomingMessage(msg) {
             if (session.step === 'ASK_RECEIPT' && isNegative) {
                 await sock.sendMessage(jid, { text: "🥰 *Thank you for using Cloud Print!* Have a wonderful day! 🖨️✨" });
                 session.step = 'IDLE';
+                session.lastOrderId = null;
+                session.lastOtp = null;
+                session.otpReleased = true;
+                session.completedOrderData = null;
+                session.notifiedCompletion = false;
+                session.paymentNotified = false;
+                session.pending = null;
                 session.receiptAskTimestamp = null;
                 saveSessions(sessions);
                 return;
@@ -897,7 +926,7 @@ async function handleIncomingMessage(msg) {
                     copies: 1,
                     price: session.lastPrice || 0,
                     originalPrice: session.lastPrice || 0,
-                    discountAmount: 0,
+                    discountAmount: session.lastDiscountAmount || 0,
                     blockLocation: session.blockLocation || 'Campus Kiosk',
                     transactionId: 'WALLET_PAYMENT',
                     paymentMethod: 'WhatsApp Cloud Print',
@@ -912,9 +941,16 @@ async function handleIncomingMessage(msg) {
                             document: receiptPdfBuffer,
                             mimetype: 'application/pdf',
                             fileName: `CloudPrint_Receipt_${orderData.orderId || 'Order'}.pdf`,
-                            caption: `🧾 *Official Payment Receipt for Order ${orderData.orderId || ''}*\n\nThank you for choosing Cloud Print Self-Service Kiosks! 🖨️✨`
+                            caption: `🧾 *Official Payment Receipt for Order ${orderData.orderId || ''}*\n\nThank you for choosing Cloud Print Self-Service Kiosks! 🖨️✨\n\n📄 *You can now send a new file anytime to start a fresh print!*`
                         });
                         session.step = 'IDLE';
+                        session.lastOrderId = null;
+                        session.lastOtp = null;
+                        session.otpReleased = true;
+                        session.completedOrderData = null;
+                        session.notifiedCompletion = false;
+                        session.paymentNotified = false;
+                        session.pending = null;
                         session.receiptAskTimestamp = null;
                         saveSessions(sessions);
                         return;
@@ -922,6 +958,13 @@ async function handleIncomingMessage(msg) {
                         console.error("Error generating receipt PDF:", pdfErr);
                         await sock.sendMessage(jid, { text: "⚠️ Could not generate PDF receipt. Please download from your web dashboard." });
                         session.step = 'IDLE';
+                        session.lastOrderId = null;
+                        session.lastOtp = null;
+                        session.otpReleased = true;
+                        session.completedOrderData = null;
+                        session.notifiedCompletion = false;
+                        session.paymentNotified = false;
+                        session.pending = null;
                         session.receiptAskTimestamp = null;
                         saveSessions(sessions);
                         return;
@@ -929,6 +972,13 @@ async function handleIncomingMessage(msg) {
                 } else {
                     await sock.sendMessage(jid, { text: "⚠️ No recent completed order found to generate a receipt." });
                     session.step = 'IDLE';
+                    session.lastOrderId = null;
+                    session.lastOtp = null;
+                    session.otpReleased = true;
+                    session.completedOrderData = null;
+                    session.notifiedCompletion = false;
+                    session.paymentNotified = false;
+                    session.pending = null;
                     session.receiptAskTimestamp = null;
                     saveSessions(sessions);
                     return;
@@ -959,7 +1009,9 @@ async function handleIncomingMessage(msg) {
                                       `🏷️ *Coupon Code*: *${couponCode}*\n` +
                                       `⏰ *Validity*: *7 Days* (Single Use Only)\n` +
                                       `-----------------------------------------\n` +
-                                      `💡 Send *"COUPON ${couponCode}"* right here in WhatsApp to credit ₹${refundVal.toFixed(2)} to your wallet!`;
+                                      `💡 *How to use this coupon:*\n` +
+                                      `• 💬 *In WhatsApp*: Reply *"COUPON ${couponCode}"* right here to add ₹${refundVal.toFixed(2)} directly to your wallet balance!\n` +
+                                      `• 🌐 *At Web Checkout*: Or apply code *${couponCode}* at checkout to reduce your print total!`;
 
                     await sock.sendMessage(jid, { text: refundMsg });
                 } else {
@@ -1005,8 +1057,9 @@ async function handleIncomingMessage(msg) {
                                `💰 *Available Wallet Balance*: *₹${userBal.toFixed(2)}*\n` +
                                `-----------------------------------\n` +
                                `⚡ *Instant 1-Tap Printing*: Your wallet balance is automatically used for zero-fee, instant print releases at kiosks!\n\n` +
-                               `🎟️ *Have a Coupon or Voucher?*\n` +
-                               `Reply with *COUPON <Code>* or just send your code (e.g. *cupon00000*, *BONUS1208*, or *123456*) to credit funds to your wallet instantly!`;
+                               `🎟️ *Have a Coupon or Voucher Code?*\n` +
+                               `• 💬 *In WhatsApp*: Send *"COUPON <Code>"* (e.g. *COUPON 123456*) to credit funds directly into your wallet!\n` +
+                               `• 🌐 *At Web Checkout*: Or apply your code on the checkout payment screen to reduce your print price!`;
                 await sock.sendMessage(jid, { text: balMsg });
                 return;
             } catch (bErr) {
@@ -1033,10 +1086,11 @@ async function handleIncomingMessage(msg) {
         }
 
         if (couponCodeFound && session.step !== 'CONFIRM_ORDER' && session.step !== 'SELECT_BLOCK') {
+            const cleanCode = couponCodeFound.trim().toUpperCase();
             const phoneToRedeem = session.realPhoneNumber || session.phoneNumber || senderPhone;
             try {
                 const redeemRes = await axios.post(
-                    `${BACKEND_BASE}/api/bot/redeem-coupon?phoneNumber=${encodeURIComponent(phoneToRedeem)}&couponCode=${encodeURIComponent(couponCodeFound)}`,
+                    `${BACKEND_BASE}/api/bot/redeem-coupon?phoneNumber=${encodeURIComponent(phoneToRedeem)}&couponCode=${encodeURIComponent(cleanCode)}`,
                     null,
                     { timeout: 8000 }
                 );
@@ -1051,12 +1105,13 @@ async function handleIncomingMessage(msg) {
                     await sock.sendMessage(jid, { text: couponSuccessMsg });
                     return;
                 } else {
-                    await sock.sendMessage(jid, { text: `⚠️ *Voucher Redemption Failed*: ${rData.message || 'Invalid or expired code.'}` });
+                    await sock.sendMessage(jid, { text: `⚠️ *Coupon Code Cannot Be Used* (*${cleanCode}*)\n-----------------------------------\n❌ ${rData.message || 'Invalid, expired, or already used code.'}` });
                     return;
                 }
             } catch (cErr) {
                 console.error("Coupon redemption error:", cErr.message);
-                await sock.sendMessage(jid, { text: "⚠️ Could not redeem voucher right now. Please try again or contact support." });
+                const errMsg = cErr.response?.data?.message || cErr.response?.data || "Could not redeem coupon right now. Please check if the code was already used or expired.";
+                await sock.sendMessage(jid, { text: `⚠️ *Coupon Redemption Failed*: ${errMsg}` });
                 return;
             }
         }
@@ -1137,16 +1192,46 @@ async function handleIncomingMessage(msg) {
             }
         }
 
-        // Active Order Lock: If user has an unreleased active order, guide them to enter OTP in WhatsApp
+        // Active Order Lock: Verify if user ACTUALLY has an unreleased active order in PENDING_SCAN or CANCEL_WINDOW
         if (session.lastOrderId && !session.otpReleased && !session.pending) {
-            await sock.sendMessage(jid, {
-                text: `🔐 *Release Your Print (*${session.lastOrderId}*)!*\n\n` +
-                      `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
-                      `📺 *Release OTP*: Look at the *Kiosk TV Display Screen* to find your 4-digit code!\n\n` +
-                      `👉 *Please reply with your 4-digit OTP right here in WhatsApp* to release and print your pages directly!\n\n` +
-                      `❌ *To cancel*: Reply *cancel* to cancel this order and refund.`
-            });
-            return;
+            let isStillActive = false;
+            try {
+                const checkRes = await axios.get(`${BACKEND_BASE}/api/pdf/details?orderId=${session.lastOrderId}`, { timeout: 3500 });
+                const oData = checkRes.data || {};
+                if (oData.status === 'PENDING_SCAN' || oData.status === 'CANCEL_WINDOW' || (oData.paymentStatus === 'PAID' && oData.status !== 'COMPLETED' && oData.status !== 'PRINTING' && oData.status !== 'CANCELLED' && oData.status !== 'EXPIRED')) {
+                    isStillActive = true;
+                } else {
+                    console.log(`ℹ️ Order ${session.lastOrderId} is status ${oData.status || 'UNKNOWN'}. Clearing active lock to allow new session.`);
+                    session.lastOrderId = null;
+                    session.lastOtp = null;
+                    session.otpReleased = true;
+                    session.completedOrderData = null;
+                    session.notifiedCompletion = false;
+                    session.paymentNotified = false;
+                    session.step = 'IDLE';
+                    saveSessions(sessions);
+                }
+            } catch (e) {
+                if (e.response?.status === 404) {
+                    console.log(`ℹ️ Order ${session.lastOrderId} not found (404). Clearing active lock.`);
+                    session.lastOrderId = null;
+                    session.lastOtp = null;
+                    session.otpReleased = true;
+                    session.step = 'IDLE';
+                    saveSessions(sessions);
+                }
+            }
+
+            if (isStillActive) {
+                await sock.sendMessage(jid, {
+                    text: `🔐 *Release Your Print (*${session.lastOrderId}*)!*\n\n` +
+                          `📍 *Target Kiosk*: *${session.blockLocation || 'Campus Kiosk'}*\n` +
+                          `📺 *Release OTP*: Look at the *Kiosk TV Display Screen* to find your 4-digit code!\n\n` +
+                          `👉 *Please reply with your 4-digit OTP right here in WhatsApp* to release and print your pages directly!\n\n` +
+                          `❌ *To cancel*: Reply *cancel* to cancel this order and refund.`
+                });
+                return;
+            }
         }
 
         // Secret Admin command "CC" to reset / change college (hidden from regular user menus)
@@ -1367,14 +1452,42 @@ async function handleIncomingMessage(msg) {
                 }
             }
 
-            // If user has an active pending order, ask them to release or cancel it first
+            // If user has an active pending order, verify if it's genuinely still active
             if (session.lastOrderId && !session.otpReleased) {
-                await sock.sendMessage(jid, {
-                    text: `⚠️ *You already have an active order (*${session.lastOrderId}*)!*\n\n` +
-                          `📺 Look at the *${session.blockLocation || 'Campus Kiosk'} TV Display Screen* for your 4-digit code and reply with it here to print.\n\n` +
-                          `❌ Or reply *cancel* to cancel your previous order before sending a new file.`
-                });
-                return;
+                let isStillActive = false;
+                try {
+                    const checkRes = await axios.get(`${BACKEND_BASE}/api/pdf/details?orderId=${session.lastOrderId}`, { timeout: 3500 });
+                    const oData = checkRes.data || {};
+                    if (oData.status === 'PENDING_SCAN' || oData.status === 'CANCEL_WINDOW' || (oData.paymentStatus === 'PAID' && oData.status !== 'COMPLETED' && oData.status !== 'PRINTING' && oData.status !== 'CANCELLED' && oData.status !== 'EXPIRED')) {
+                        isStillActive = true;
+                    } else {
+                        console.log(`ℹ️ Previous order ${session.lastOrderId} is status ${oData.status || 'UNKNOWN'}. Clearing old order to process new document.`);
+                        session.lastOrderId = null;
+                        session.lastOtp = null;
+                        session.otpReleased = true;
+                        session.completedOrderData = null;
+                        session.notifiedCompletion = false;
+                        session.paymentNotified = false;
+                        session.step = 'IDLE';
+                        saveSessions(sessions);
+                    }
+                } catch (e) {
+                    if (e.response?.status === 404) {
+                        session.lastOrderId = null;
+                        session.otpReleased = true;
+                        session.step = 'IDLE';
+                        saveSessions(sessions);
+                    }
+                }
+
+                if (isStillActive) {
+                    await sock.sendMessage(jid, {
+                        text: `⚠️ *You already have an active order (*${session.lastOrderId}*)!*\n\n` +
+                              `📺 Look at the *${session.blockLocation || 'Campus Kiosk'} TV Display Screen* for your 4-digit code and reply with it here to print.\n\n` +
+                              `❌ Or reply *cancel* to cancel your previous order before sending a new file.`
+                    });
+                    return;
+                }
             }
 
             let buffer;
@@ -1935,8 +2048,19 @@ async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
     const rate = session.pending.printType === 'COLOR' ? 5.0 : (session.pending.doubleSided ? 1.50 : 2.0);
     const div = session.pending.doubleSided ? 2.0 : 1.0;
     const paperSheets = Math.ceil(pageCount / div);
-    const estimatedTotal = (session.pending.doubleSided && pageCount === 1) ? 2.00 : paperSheets * (session.pending.copies || 1) * rate;
+    const originalTotal = (session.pending.doubleSided && pageCount === 1) ? 2.00 : paperSheets * (session.pending.copies || 1) * rate;
 
+    let discountAmount = 0.0;
+    let appliedCoupon = null;
+    if (session.savedDiscountCoupon && session.savedDiscountCoupon.code) {
+        appliedCoupon = session.savedDiscountCoupon.code;
+        discountAmount = Number(session.savedDiscountCoupon.amount || 2.0);
+    }
+
+    const estimatedTotal = Math.max(0.0, originalTotal - discountAmount);
+    session.pending.originalTotal = originalTotal;
+    session.pending.discountAmount = discountAmount;
+    session.pending.couponCode = appliedCoupon;
     session.pending.estimatedTotal = estimatedTotal;
 
     let userBalance = 0.0;
@@ -1951,17 +2075,31 @@ async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
     session.step = 'CONFIRM_ORDER';
     saveSessions(sessions);
 
+    const isFreeWithCoupon = estimatedTotal <= 0.0 && discountAmount > 0;
     const hasEnoughWallet = userBalance >= estimatedTotal;
-    const menuOptions = hasEnoughWallet
+    const menuOptions = isFreeWithCoupon
         ? [
-            `💳 Pay via Wallet Balance (Available: ₹${userBalance.toFixed(2)})`,
-            '🌐 Pay Online via Razorpay Link',
+            '🎉 Confirm Free Print (Covered 100% by Coupon)',
             '❌ Cancel Order'
           ]
-        : [
-            '✅ Confirm & Pay (Get Razorpay Link)',
-            '❌ Cancel Order'
-          ];
+        : (hasEnoughWallet
+            ? [
+                `💳 Pay via Wallet Balance (Available: ₹${userBalance.toFixed(2)})`,
+                '🌐 Pay Online via Razorpay Link',
+                '❌ Cancel Order'
+              ]
+            : [
+                '✅ Confirm & Pay (Get Razorpay Link)',
+                '❌ Cancel Order'
+              ]
+          );
+
+    let priceSummary = `💰 Total Amount: *₹${estimatedTotal.toFixed(2)}*\n`;
+    if (discountAmount > 0) {
+        priceSummary = `💵 Original Total: *₹${originalTotal.toFixed(2)}*\n` +
+                       `🏷️ Coupon Discount (*${appliedCoupon}*): *-₹${discountAmount.toFixed(2)}*\n` +
+                       `💰 Final Amount: *₹${estimatedTotal.toFixed(2)}*` + (estimatedTotal <= 0 ? ' *(100% FREE PRINT)*' : '') + `\n`;
+    }
 
     const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
         `📄 File: *${session.pending.filename}*\n` +
@@ -1970,7 +2108,7 @@ async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
         `🎨 Mode: *${session.pending.printType === 'COLOR' ? 'Color (₹5/pg)' : 'Black & White (₹2/pg)'}*\n` +
         `🔢 Copies: *${session.pending.copies || 1}*\n` +
         `📍 Kiosk: *${session.blockLocation}* (${session.college})\n` +
-        `💰 Total Amount: *₹${estimatedTotal.toFixed(2)}*\n` +
+        priceSummary +
         `💳 Wallet Balance: *₹${userBalance.toFixed(2)}*`;
 
     await sendSmartMenu(
@@ -2086,6 +2224,13 @@ function startOrderMonitoring() {
                         if (data.status === 'COMPLETED' && !session.notifiedCompletion) {
                             const priceVal = data.price || session.lastPrice || 0;
                             const priceFormatted = typeof priceVal === 'number' ? priceVal : (parseFloat(priceVal) || 0);
+                            const origPriceVal = Number(data.originalPrice != null ? data.originalPrice : (session.lastOriginalPrice || priceFormatted));
+                            const discountVal = Number(data.discountAmount != null ? data.discountAmount : (session.lastDiscountAmount || (origPriceVal > priceFormatted ? (origPriceVal - priceFormatted) : 0)));
+                            let actualPaid = priceFormatted;
+                            if (discountVal >= origPriceVal && origPriceVal > 0) {
+                                actualPaid = 0;
+                            }
+                            const isCouponPayment = actualPaid <= 0 || (discountVal >= origPriceVal && origPriceVal > 0);
 
                             session.completedOrderData = {
                                 orderId: session.lastOrderId || data.orderId,
@@ -2094,12 +2239,12 @@ function startOrderMonitoring() {
                                 doubleSided: data.doubleSided || false,
                                 printType: data.printType || 'BW',
                                 copies: data.copies || 1,
-                                price: priceFormatted,
-                                originalPrice: data.originalPrice || priceFormatted,
-                                discountAmount: data.discountAmount || 0,
+                                price: actualPaid,
+                                originalPrice: origPriceVal,
+                                discountAmount: discountVal > 0 ? discountVal : (isCouponPayment ? origPriceVal : 0),
                                 blockLocation: session.blockLocation || data.blockLocation || 'Campus Kiosk',
-                                transactionId: data.razorpayPaymentId || 'WALLET_PAYMENT',
-                                paymentMethod: data.orderChannel === 'WHATSAPP' ? 'WhatsApp Cloud Print' : 'Web Portal',
+                                transactionId: isCouponPayment ? 'COUPON PAYMENT (₹0.00 PAID)' : (data.razorpayPaymentId || 'WALLET_PAYMENT'),
+                                paymentMethod: isCouponPayment ? 'Coupon / 100% Wallet Discount' : (data.orderChannel === 'WHATSAPP' ? 'WhatsApp Cloud Print' : 'Web Portal'),
                                 paidAt: data.paidAt || Date.now()
                             };
 
@@ -2124,7 +2269,12 @@ function startOrderMonitoring() {
                             session.step = 'IDLE';
                             session.completedOrderData = null;
                             session.lastOrderId = null;
+                            session.lastOtp = null;
+                            session.otpReleased = true;
                             session.receiptAskTimestamp = null;
+                            session.notifiedCompletion = false;
+                            session.paymentNotified = false;
+                            session.pending = null;
                             updated = true;
                         }
 

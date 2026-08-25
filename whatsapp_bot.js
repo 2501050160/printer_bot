@@ -102,7 +102,7 @@ async function checkKioskPrinterStatus(blockLocation, printType = 'BW') {
     const cacheKey = `${blockLocation}_${printType}`;
     const cached = printerStatusCache.get(cacheKey);
     const now = Date.now();
-    if (cached && (now - cached.timestamp < 60000)) {
+    if (cached && (now - cached.timestamp < 30000)) {
         return cached.result;
     }
 
@@ -124,6 +124,33 @@ async function checkKioskPrinterStatus(blockLocation, printType = 'BW') {
 
     const fallback = { available: true, message: 'Printer is available' };
     return cached ? cached.result : fallback;
+}
+
+async function getKioskPaperCount(blockLocation) {
+    if (!blockLocation) return 500;
+    try {
+        const res = await axios.get(`${BACKEND_BASE}/api/printer/paper?blockLocation=${encodeURIComponent(blockLocation)}`, { timeout: 6000 });
+        if (res.data !== undefined && res.data !== null && !isNaN(Number(res.data))) {
+            return Number(res.data);
+        }
+    } catch (e) {
+        console.error(`Paper count fetch notice for ${blockLocation}:`, e.message);
+    }
+    return 500;
+}
+
+async function sendDirectAdminAlert(sockInstance, text) {
+    if (!sockInstance) return;
+    const adminPhones = ['919494189664', '918688500278'];
+    for (const phone of adminPhones) {
+        try {
+            const targetJid = `${phone.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
+            await sockInstance.sendMessage(targetJid, { text });
+            console.log(`📱 Hardware/Paper alert delivered to Admin WhatsApp (+${phone})`);
+        } catch (e) {
+            console.error(`Failed to dispatch alert to Admin (+${phone}):`, e.message);
+        }
+    }
 }
 
 function getPDFPageCount(buffer) {
@@ -712,6 +739,12 @@ async function processOrderCreationAndPayment(sock, jid, session, senderName, se
 let sock = null;
 
 async function startBot() {
+    if (sock) {
+        try { sock.ev.removeAllListeners(); } catch (e) {}
+        try { sock.end(); } catch (e) {}
+        sock = null;
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
 
@@ -720,10 +753,15 @@ async function startBot() {
         auth: state,
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
+        syncFullHistory: false,
+        connectTimeoutMs: 60000,
+        keepAliveIntervalMs: 30000,
         browser: ['Cloud Print Bot', 'Chrome', '1.0.0']
     });
 
     sock.ev.on('creds.update', saveCreds);
+
+    let isStartingOrderMonitoring = false;
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
@@ -766,11 +804,29 @@ async function startBot() {
         }
 
         if (connection === 'close') {
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('Connection closed. Reconnecting...', shouldReconnect);
-            if (shouldReconnect) {
-                setTimeout(startBot, 3000);
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const isReplaced = statusCode === 440 || statusCode === DisconnectReason.connectionReplaced;
+            const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+
+            if (sock) {
+                try { sock.ev.removeAllListeners(); } catch (e) {}
+                try { sock.end(); } catch (e) {}
+                sock = null;
             }
+
+            if (isLoggedOut) {
+                console.log('❌ Device was logged out. Please restart and scan QR code.');
+                return;
+            }
+
+            if (isReplaced) {
+                console.log('⚠️ Session connected from another terminal/process (status 440). Waiting 15s to avoid collision...');
+                setTimeout(startBot, 15000);
+                return;
+            }
+
+            console.log(`Connection closed (status ${statusCode || 'unknown'}). Reconnecting in 5s...`);
+            setTimeout(startBot, 5000);
         }
     });
 
@@ -778,7 +834,11 @@ async function startBot() {
         if (!m.messages || m.messages.length === 0) return;
         for (const msg of m.messages) {
             if (!msg.message || msg.key.fromMe) continue;
-            await handleIncomingMessage(msg);
+            try {
+                await handleIncomingMessage(msg);
+            } catch (err) {
+                console.error("Error processing message:", err.message);
+            }
         }
     });
 }
@@ -876,6 +936,28 @@ async function handleIncomingMessage(msg) {
 
         const collegesMap = await getCollegesAndBlocks();
         const collegeList = Object.keys(collegesMap);
+
+        // ==========================================
+        // Admin Test / Low Paper Alert Command Trigger
+        // ==========================================
+        if (textLower === '!alert' || textLower === '!lowpaper' || textLower === '!paper' || textLower === '!test_alert' || textLower === 'test alert' || textLower === '!test') {
+            const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+            const testAlertMsg = `🚨 *CLOUD PRINT HARDWARE ALERT*\n` +
+                                 `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                                 `📍 *Location*: *C Block (KLU)*\n` +
+                                 `🖨️ *Printer*: *Kiosk Color LaserJet Pro*\n` +
+                                 `⚠️ *Status*: *LOW_PAPER*\n` +
+                                 `📝 *Details*: ⚠️ Low paper warning: Only 12 sheets remaining at C Block. Refill soon.\n` +
+                                 `⏱️ *Time*: *${timestamp}*\n` +
+                                 `━━━━━━━━━━━━━━━━━━━━━━\n` +
+                                 `👉 *Action required*: Please inspect kiosk and refill paper tray!`;
+
+            await sock.sendMessage(jid, { text: testAlertMsg });
+            if (jid !== '919494189664@s.whatsapp.net') {
+                await sock.sendMessage('919494189664@s.whatsapp.net', { text: testAlertMsg }).catch(() => {});
+            }
+            return;
+        }
 
         // ==========================================
         // Handle Post-Print Receipt Request (Replies to "Would you like a receipt?")
@@ -1987,6 +2069,36 @@ async function handleIncomingMessage(msg) {
                     await sock.sendMessage(jid, { text: `⚠️ *Please reply with a valid number of copies* (e.g. *1*, *2*, *5*, *10*, *20*, *50*, etc.):` });
                     return;
                 }
+
+                // Check paper availability for requested copies
+                const isImage = Boolean(session.pending?.isImage);
+                const pageCount = isImage ? 1 : countPagesFromRange(session.pending?.selectedPages, session.pending?.totalPages);
+                const div = session.pending?.doubleSided ? 2.0 : 1.0;
+                const sheetsPerCopy = Math.ceil(pageCount / div);
+                const totalSheetsNeeded = sheetsPerCopy * c;
+
+                const availablePaper = await getKioskPaperCount(session.blockLocation);
+
+                if (availablePaper <= 0) {
+                    await sock.sendMessage(jid, {
+                        text: `🚨 *Kiosk Out of Paper (${session.blockLocation})*:\nThis kiosk is currently out of paper (0 sheets remaining in tray).\n\n👉 Please type *menu* to switch to another active kiosk block.`
+                    });
+                    await sendDirectAdminAlert(sock, `🚨 *OUT OF PAPER ALERT*\n━━━━━━━━━━━━━━━━━━━━━━\n📍 Location: *${session.blockLocation}*\n⚠️ Available Paper: *0 sheets*\n📱 User +91 ${senderPhone} attempted to print ${totalSheetsNeeded} sheets.\n👉 Refill paper immediately!`);
+                    return;
+                }
+
+                if (totalSheetsNeeded > availablePaper) {
+                    const maxCopies = Math.floor(availablePaper / Math.max(1, sheetsPerCopy));
+                    await sock.sendMessage(jid, {
+                        text: `⚠️ *Insufficient Paper in Kiosk (${session.blockLocation})*:\n` +
+                              `• Requested: *${c} copies* (*${totalSheetsNeeded} sheets* required)\n` +
+                              `• Available in Tray: *${availablePaper} sheets*\n\n` +
+                              `👉 Please reply with a smaller number of copies (maximum *${maxCopies > 0 ? maxCopies : 1} copies*), or type *menu* to switch to another kiosk with more paper.`
+                    });
+                    await sendDirectAdminAlert(sock, `⚠️ *LOW PAPER WARNING / CAPACITY EXCEEDED*\n━━━━━━━━━━━━━━━━━━━━━━\n📍 Location: *${session.blockLocation}*\n⚠️ Available Paper: *${availablePaper} sheets*\n📱 User +91 ${senderPhone} requested *${c} copies* (*${totalSheetsNeeded} sheets* needed).\n👉 Please inspect kiosk and refill paper tray!`);
+                    return;
+                }
+
                 session.pending.copies = c;
                 await showOrderSummary(sock, jid, session, sessions, senderPhone);
                 return;
@@ -2121,9 +2233,15 @@ async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
     );
 }
 
+let orderMonitoringInterval = null;
+
 function startOrderMonitoring() {
-    // Check orders every 3s for fast and responsive WhatsApp notifications
-    setInterval(async () => {
+    if (orderMonitoringInterval) {
+        clearInterval(orderMonitoringInterval);
+        orderMonitoringInterval = null;
+    }
+    // Check orders every 5s for fast and responsive WhatsApp notifications
+    orderMonitoringInterval = setInterval(async () => {
         try {
             const sessions = loadSessions();
             let updated = false;
@@ -2146,6 +2264,10 @@ function startOrderMonitoring() {
                                 console.log(`ℹ️ Order ${session.lastOrderId} not found on backend (404). Clearing stale order.`);
                                 session.lastOrderId = null;
                                 session.lastOtp = null;
+                                session.printingNotified = false;
+                                session.paymentNotified = false;
+                                session.notifiedCancelled = false;
+                                session.notifiedCompletion = false;
                                 updated = true;
                                 continue;
                             }
@@ -2161,19 +2283,31 @@ function startOrderMonitoring() {
                             const userOtp = data.otpCode || session.lastOtp || '';
                             const msgText = `✅ *Payment Confirmed for Order ${session.lastOrderId}!* 🎉\n\n` +
                                             `📍 *Target Kiosk*: *${session.blockLocation || data.blockLocation || 'Campus Kiosk'}*\n` +
-                                            `📺 *Release OTP*: Look at the *Kiosk TV Display Screen* at *${session.blockLocation || data.blockLocation || 'Campus Kiosk'}* to find your 4-digit code!\n` +
+                                            `📺 *Release OTP*: Look at the *Kiosk TV Display Screen* at *${session.blockLocation || data.blockLocation || 'Campus Kiosk'}* for your 4-digit code!\n` +
                                             `⏳ *OTP Validity*: *10 Minutes* (Expires at *${expiryTimeStr}*)\n\n` +
                                             `👉 *Whenever you are near the ${session.blockLocation || data.blockLocation || 'Campus Kiosk'} printer, look at the TV screen for your 4-digit code and reply with it here in WhatsApp* to release your print directly to the printer tray!`;
 
                             await sock.sendMessage(targetJid, { text: msgText });
                             session.paymentNotified = true;
+                            session.printingNotified = false;
                             if (userOtp) session.lastOtp = userOtp;
                             session.paidTimestamp = nowMs;
                             session.lastReminderTimestamp = nowMs;
                             updated = true;
                         }
 
-                        // 3. Auto-cancel Unpaid Orders only if NOT paid after 5 Minutes (300,000 ms)
+                        // 3. Printing in Progress Notification
+                        if ((data.status === 'QUEUE' || data.status === 'PRINTING') && !session.printingNotified && !session.notifiedCompletion) {
+                            const printingMsg = `🖨️ *Printing in Progress for Order ${session.lastOrderId}!* ⚡\n\n` +
+                                                `📍 *Target Kiosk*: *${session.blockLocation || data.blockLocation || 'Campus Kiosk'}*\n` +
+                                                `📄 *Document*: *${data.fileName || 'Document.pdf'}* (${data.totalPages || 1} page(s), ${data.copies || 1} copy)\n\n` +
+                                                `Your pages are actively printing right now in the kiosk tray! Please stand by to collect your pages. 🎉`;
+                            await sock.sendMessage(targetJid, { text: printingMsg });
+                            session.printingNotified = true;
+                            updated = true;
+                        }
+
+                        // 4. Auto-cancel Unpaid Orders only if NOT paid after 5 Minutes (300,000 ms)
                         if (!isPaid && !session.paymentNotified && session.orderCreatedTimestamp) {
                             const unpaidElapsed = nowMs - session.orderCreatedTimestamp;
                             if (unpaidElapsed >= 300000) { // 5 minutes
@@ -2183,7 +2317,7 @@ function startOrderMonitoring() {
                                     }).catch(() => {});
                                 } catch (e) {}
 
-                                const timeoutMsg = `❌ *Order ${session.lastOrderId} Cancelled (Payment Timeout)*\n\n` +
+                                const timeoutMsg = `⏰ *Order ${session.lastOrderId} Cancelled (Payment Timeout)*\n\n` +
                                                    `Your print order was automatically cancelled because payment was not confirmed within 5 minutes.\n\n` +
                                                    `📄 *Need to print?* Simply attach and send your document again to create a new order anytime!`;
 
@@ -2193,19 +2327,20 @@ function startOrderMonitoring() {
                                 session.pending = null;
                                 session.step = 'IDLE';
                                 session.orderCreatedTimestamp = null;
+                                session.printingNotified = false;
+                                session.paymentNotified = false;
                                 updated = true;
                                 continue;
                             }
                         }
 
-                        // 4. Periodic 2-Minute Expiry Reminder
+                        // 5. Periodic 2-Minute Expiry Reminder
                         if ((data.status === 'PENDING_SCAN' || data.status === 'CANCEL_WINDOW' || data.status === 'PAID') && session.paymentNotified && !session.otpReleased) {
                             const lastReminder = session.lastReminderTimestamp || session.paidTimestamp || 0;
                             const timeSincePaid = nowMs - (session.paidTimestamp || nowMs);
                             const totalLimitMs = 15 * 60 * 1000;
                             const remainingMs = Math.max(0, totalLimitMs - timeSincePaid);
                             const minutesLeft = Math.ceil(remainingMs / 60000);
-                            const userOtp = data.otpCode || session.lastOtp || '';
 
                             if (nowMs - lastReminder >= 120000 && minutesLeft > 0) {
                                 const reminderText = `⏰ *REMINDER: Print Order Pending Release (${session.lastOrderId})!*\n\n` +
@@ -2220,7 +2355,7 @@ function startOrderMonitoring() {
                             }
                         }
 
-                        // 3. Print Completed Notification & Ask for Receipt
+                        // 6. Print Completed Notification & Ask for Receipt
                         if (data.status === 'COMPLETED' && !session.notifiedCompletion) {
                             const priceVal = data.price || session.lastPrice || 0;
                             const priceFormatted = typeof priceVal === 'number' ? priceVal : (parseFloat(priceVal) || 0);
@@ -2260,10 +2395,11 @@ function startOrderMonitoring() {
                             session.step = 'ASK_RECEIPT';
                             session.receiptAskTimestamp = nowMs;
                             session.notifiedCompletion = true;
+                            session.printingNotified = false;
                             updated = true;
                         }
 
-                        // 3b. Check if ASK_RECEIPT timed out (3 minutes = 180,000 ms) with no response
+                        // 7. Check if ASK_RECEIPT timed out (3 minutes = 180,000 ms) with no response
                         if (session.step === 'ASK_RECEIPT' && session.receiptAskTimestamp && (nowMs - session.receiptAskTimestamp > 180000)) {
                             await sock.sendMessage(targetJid, { text: "🥰 *Thank you for using Cloud Print!* Have a wonderful day! 🖨️✨" });
                             session.step = 'IDLE';
@@ -2274,31 +2410,42 @@ function startOrderMonitoring() {
                             session.receiptAskTimestamp = null;
                             session.notifiedCompletion = false;
                             session.paymentNotified = false;
+                            session.printingNotified = false;
                             session.pending = null;
                             updated = true;
                         }
 
-                        // 4. Timeout Expiry / Cancellation Notification with 7-Day Refund Coupon
-                        if ((data.status === 'CANCELLED' || data.status === 'EXPIRED') && !session.notifiedCancelled && !session.notifiedCompletion && !session.otpReleased) {
+                        // 8. Timeout Expiry / Cancellation Notification with 7-Day Refund Coupon
+                        if ((data.status === 'CANCELLED' || data.status === 'EXPIRED' || data.status === 'FAILED') && !session.notifiedCancelled && !session.notifiedCompletion && !session.otpReleased) {
                             const refundVal = data.price || session.lastPrice || 2.0;
                             const refundNum = typeof refundVal === 'number' ? refundVal : (parseFloat(refundVal) || 2.0);
                             const couponCode = await generateRefundCoupon(refundNum);
 
-                            const msgText = `⏰ *Order ${session.lastOrderId} Expired / Cancelled*\n\n` +
-                                            `The release OTP was not entered within the time limit.\n\n` +
-                                            `🎟️ *PRINT REFUND COUPON GENERATED*:\n` +
-                                            `-----------------------------------------\n` +
+                            const statusTitle = data.status === 'FAILED' 
+                                ? `⚠️ *Print Job Error for Order ${session.lastOrderId}*`
+                                : `⏰ *Order ${session.lastOrderId} Expired / Cancelled*`;
+
+                            const statusDesc = data.status === 'FAILED'
+                                ? `Our kiosk encountered an issue while printing your pages.`
+                                : `The release OTP was not entered at the kiosk within the time limit.`;
+
+                            const msgText = `${statusTitle}\n\n` +
+                                            `${statusDesc}\n\n` +
+                                            `🎟️ *100% REFUND COUPON GENERATED*:\n` +
+                                            `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                                             `💰 *Refund Value*: *₹${refundNum.toFixed(2)}*\n` +
                                             `🏷️ *Coupon Code*: *${couponCode}*\n` +
                                             `⏰ *Validity*: *7 Days* (Single Use Only)\n` +
-                                            `-----------------------------------------\n` +
+                                            `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                                             `💡 *How to Redeem*:\n` +
-                                            `1. Reply *"${couponCode}"* or *"COUPON ${couponCode}"* right here on WhatsApp to add ₹${refundNum.toFixed(2)} to your wallet balance instantly!\n` +
+                                            `1. Reply *"COUPON ${couponCode}"* right here in WhatsApp to add ₹${refundNum.toFixed(2)} to your wallet balance instantly!\n` +
                                             `2. Or enter code *${couponCode}* on the checkout page of your next order.`;
 
                             await sock.sendMessage(targetJid, { text: msgText });
                             session.lastOrderId = null;
                             session.lastOtp = null;
+                            session.printingNotified = false;
+                            session.paymentNotified = false;
                             session.notifiedCancelled = true;
                             updated = true;
                         }
@@ -2319,25 +2466,29 @@ function startOrderMonitoring() {
 
             // 5. Poll Hardware & Paper Level Alerts and Dispatch to Admin WhatsApp (+91 9494189664)
             try {
-                const alertsRes = await axios.get(`${BACKEND_BASE}/api/alerts/pending`, { timeout: 6000 });
-                if (alertsRes.data && Array.isArray(alertsRes.data) && alertsRes.data.length > 0) {
-                    const adminJid = '919494189664@s.whatsapp.net';
-                    const agentJid = '918688500278@s.whatsapp.net';
-                    for (const alert of alertsRes.data) {
-                        const alertMsg = alert.message || `🚨 *CLOUD PRINT KIOSK ALERT*\n━━━━━━━━━━━━━━━━━━━━━━\n📍 *Location*: ${alert.blockLocation || 'Campus Kiosk'}\n⚠️ *Status*: *${alert.alertType || 'ALERT'}*\n📝 *Details*: ${alert.details || 'Hardware alert'}\n⏱️ *Time*: ${alert.timestamp || new Date().toLocaleString()}`;
-                        try {
-                            await sock.sendMessage(adminJid, { text: alertMsg });
-                            console.log(`📱 Alert delivered to Admin WhatsApp (+91 9494189664): ${alert.alertType}`);
-                        } catch (err) {
-                            console.error("Failed to send alert to Admin:", err.message);
+                let alertList = [];
+                try {
+                    const alertsRes1 = await axios.get(`${BACKEND_BASE}/api/alerts/pending`, { timeout: 5000 });
+                    if (alertsRes1.data && Array.isArray(alertsRes1.data)) alertList.push(...alertsRes1.data);
+                } catch (e) {}
+                try {
+                    const alertsRes2 = await axios.get(`${BACKEND_BASE}/api/printer/alerts/pending`, { timeout: 5000 });
+                    if (alertsRes2.data && Array.isArray(alertsRes2.data)) {
+                        for (const a of alertsRes2.data) {
+                            if (!alertList.some(x => x.id === a.id)) alertList.push(a);
                         }
-                        try {
-                            await sock.sendMessage(agentJid, { text: alertMsg });
-                        } catch (err) {}
+                    }
+                } catch (e) {}
+
+                if (alertList.length > 0) {
+                    for (const alert of alertList) {
+                        const alertMsg = alert.message || `🚨 *CLOUD PRINT KIOSK ALERT*\n━━━━━━━━━━━━━━━━━━━━━━\n📍 *Location*: ${alert.blockLocation || 'Campus Kiosk'}\n⚠️ *Status*: *${alert.alertType || 'ALERT'}*\n📝 *Details*: ${alert.details || 'Hardware alert'}\n⏱️ *Time*: ${alert.timestamp || new Date().toLocaleString()}`;
+                        await sendDirectAdminAlert(sock, alertMsg);
                         
                         // Acknowledge alert
                         if (alert.id) {
                             await axios.post(`${BACKEND_BASE}/api/alerts/ack?id=${encodeURIComponent(alert.id)}`, null, { timeout: 5000 }).catch(() => {});
+                            await axios.post(`${BACKEND_BASE}/api/printer/alerts/ack?id=${encodeURIComponent(alert.id)}`, null, { timeout: 5000 }).catch(() => {});
                         }
                     }
                 }

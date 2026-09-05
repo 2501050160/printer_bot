@@ -4,5 +4,7 @@ node_modules/
 .wwebjs_cache/
 baileys_auth_info/
 user_sessions.json
+user_prefs.json
 .env
 *.log
+verify_*.js

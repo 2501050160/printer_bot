@@ -18,6 +18,7 @@ const {
     getAggregateVotesInPollMessage,
     proto
 } = require('@whiskeysockets/baileys');
+const { PDFDocument, PageSizes, StandardFonts, rgb } = require('pdf-lib');
 const pino = require('pino');
 const QRCode = require('qrcode');
 const fs = require('fs');
@@ -27,25 +28,158 @@ const path = require('path');
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://printer-backend-1.onrender.com/api/bot/direct-upload';
 const SESSIONS_FILE = path.join(__dirname, 'user_sessions.json');
+const PREFS_FILE = path.join(__dirname, 'user_prefs.json');
 
-console.log('🤖 Initializing Cloud Print Interactive WhatsApp Bot Agent...');
+console.log('🤖 Initializing Cloud Print Interactive WhatsApp Bot Agent (In-Memory TTL Store)...');
+
+// In-Memory Session Store with Sliding TTL & Auto-Garbage Collection (0 Disk I/O Bottleneck)
+class SessionStore {
+    constructor(ttlMinutes = 20) {
+        this.ttlMs = ttlMinutes * 60 * 1000;
+        this.sessions = new Map();
+        this.bufferCache = new Map(); // JID -> { buffer, timestamp }
+        this.userPrefs = new Map(); // JID -> { college, blockLocation, realPhoneNumber }
+        this.loadPreferences();
+
+        // Background TTL cleanup every 2 minutes
+        setInterval(() => this.cleanupExpired(), 2 * 60 * 1000);
+    }
+
+    loadPreferences() {
+        try {
+            if (fs.existsSync(PREFS_FILE)) {
+                const data = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8'));
+                for (const [key, val] of Object.entries(data)) {
+                    this.userPrefs.set(key, val);
+                }
+            } else if (fs.existsSync(SESSIONS_FILE)) {
+                try {
+                    const legacy = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+                    for (const [key, val] of Object.entries(legacy)) {
+                        if (val.college || val.blockLocation || val.realPhoneNumber) {
+                            this.userPrefs.set(key, {
+                                college: val.college || null,
+                                blockLocation: val.blockLocation || null,
+                                realPhoneNumber: val.realPhoneNumber || val.phoneNumber || null
+                            });
+                        }
+                    }
+                    this.savePreferences();
+                } catch (migErr) {}
+            }
+        } catch (e) {
+            console.error('Failed to load user preferences:', e.message);
+        }
+    }
+
+    savePreferences() {
+        try {
+            const obj = {};
+            for (const [key, val] of this.userPrefs.entries()) {
+                obj[key] = val;
+            }
+            fs.writeFileSync(PREFS_FILE, JSON.stringify(obj, null, 2), 'utf8');
+        } catch (e) {
+            console.error('Failed to save user preferences:', e.message);
+        }
+    }
+
+    getSession(jid) {
+        let session = this.sessions.get(jid);
+        if (!session) {
+            const prefs = this.userPrefs.get(jid) || {};
+            session = {
+                jid,
+                phoneNumber: prefs.realPhoneNumber || null,
+                realPhoneNumber: prefs.realPhoneNumber || null,
+                name: 'Student',
+                college: prefs.college || null,
+                blockLocation: prefs.blockLocation || null,
+                step: 'IDLE',
+                pending: null,
+                lastActivity: Date.now()
+            };
+            this.sessions.set(jid, session);
+        } else {
+            session.lastActivity = Date.now();
+        }
+        return session;
+    }
+
+    setSession(jid, session) {
+        if (!session) return;
+        session.lastActivity = Date.now();
+        this.sessions.set(jid, session);
+
+        if (session.college || session.blockLocation || session.realPhoneNumber) {
+            const currentPrefs = this.userPrefs.get(jid) || {};
+            if (currentPrefs.college !== session.college ||
+                currentPrefs.blockLocation !== session.blockLocation ||
+                currentPrefs.realPhoneNumber !== session.realPhoneNumber) {
+                this.userPrefs.set(jid, {
+                    college: session.college || null,
+                    blockLocation: session.blockLocation || null,
+                    realPhoneNumber: session.realPhoneNumber || session.phoneNumber || null
+                });
+                this.savePreferences();
+            }
+        }
+    }
+
+    getAllSessions() {
+        const obj = {};
+        for (const [key, val] of this.sessions.entries()) {
+            obj[key] = val;
+        }
+        return obj;
+    }
+
+    setBuffer(jid, buffer) {
+        this.bufferCache.set(jid, { buffer, timestamp: Date.now() });
+    }
+
+    getBuffer(jid) {
+        const entry = this.bufferCache.get(jid);
+        return entry ? entry.buffer : null;
+    }
+
+    deleteBuffer(jid) {
+        this.bufferCache.delete(jid);
+    }
+
+    cleanupExpired() {
+        const now = Date.now();
+        for (const [jid, entry] of this.bufferCache.entries()) {
+            if (now - entry.timestamp > 15 * 60 * 1000) {
+                this.bufferCache.delete(jid);
+            }
+        }
+
+        for (const [jid, session] of this.sessions.entries()) {
+            if (session.lastOrderId && !session.notifiedCompletion) {
+                continue;
+            }
+            if (now - (session.lastActivity || 0) > this.ttlMs) {
+                if (session.step !== 'IDLE' || session.pending) {
+                    session.step = 'IDLE';
+                    session.pending = null;
+                    this.deleteBuffer(jid);
+                }
+            }
+        }
+    }
+}
+
+const sessionStore = new SessionStore(20);
 
 function loadSessions() {
-    try {
-        if (fs.existsSync(SESSIONS_FILE)) {
-            return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-        }
-    } catch (e) {
-        console.error('Failed to load user_sessions.json:', e);
-    }
-    return {};
+    return sessionStore.getAllSessions();
 }
 
 function saveSessions(sessions) {
-    try {
-        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
-    } catch (e) {
-        console.error('Failed to save user_sessions.json:', e);
+    if (!sessions) return;
+    for (const [jid, s] of Object.entries(sessions)) {
+        sessionStore.setSession(jid, s);
     }
 }
 
@@ -519,69 +653,67 @@ async function startBot() {
                     const estimatedTotal = pageCount * session.pending.copies * rate;
 
                     session.pending.estimatedTotal = estimatedTotal;
-                    session.step = 'CONFIRM_ORDER';
-                    saveSessions(sessions);
 
-                    await sendInteractiveButtons(
-                        sock,
-                        from,
-                        '📋 Cloud Print Order Summary',
-                        `📄 File: *${session.pending.filename}*\n📊 Pages: *${pageCount}* (Range: ${session.pending.selectedPages})\n🎨 Mode: *${session.pending.printType === 'COLOR' ? 'Color (₹5/pg)' : 'Black & White (₹2/pg)'}*\n📍 Kiosk: *${session.blockLocation}* (${session.college})\n💰 Total Estimate: *₹${estimatedTotal.toFixed(2)}*\n\n📍 *Reply 'block' to change kiosk* | ❌ *Reply 'quit' to cancel*`,
-                        'Confirm Order',
-                        [
-                            { id: 'confirm_YES', text: '✅ Confirm Order (YES)' },
-                            { id: 'confirm_NO', text: '❌ Cancel Order (NO)' }
-                        ],
-                        senderPhone
-                    );
+                    // Message 1: Summary Notice
+                    const summaryMsg = `*📋 Cloud Print Order Summary*\n\n` +
+                                       `📄 File: *${session.pending.filename}*\n` +
+                                       `📊 Pages: *${pageCount}* (Range: ${session.pending.selectedPages})\n` +
+                                       `🎨 Mode: *${session.pending.printType === 'COLOR' ? 'Color (₹5/pg)' : 'Black & White (₹2/pg)'}*\n` +
+                                       `📍 Kiosk: *${session.blockLocation}* (${session.college})\n` +
+                                       `💰 Total Amount: *₹${estimatedTotal.toFixed(2)}*`;
+
+                    await sock.sendMessage(from, { text: summaryMsg });
+                    await sock.sendMessage(from, { text: "⏳ *Creating your order and payment link... Please wait.*" });
+
+                    const buffer = Buffer.from(session.pending.bufferBase64, 'base64');
+                    const form = new FormData();
+                    form.append('file', buffer, { filename: session.pending.filename, contentType: session.pending.mimetype });
+                    form.append('customerName', `${pushName} (${senderPhone})`);
+                    form.append('phoneNumber', senderPhone);
+                    form.append('blockLocation', session.blockLocation);
+                    form.append('printType', session.pending.printType);
+
+                    let response;
+                    try {
+                        response = await axios.post(BACKEND_URL, form, { headers: form.getHeaders(), timeout: 30000 });
+                    } catch (primaryErr) {
+                        const fallbackUrl = 'https://printer-backend-1.onrender.com/api/bot/direct-upload';
+                        form.append('file', buffer, { filename: session.pending.filename, contentType: session.pending.mimetype });
+                        response = await axios.post(fallbackUrl, form, { headers: form.getHeaders(), timeout: 30000 });
+                    }
+
+                    const resData = response.data || {};
+                    const otp = resData.otp || '0001';
+                    const orderId = resData.orderId || 'ORD2026';
+                    const paymentUrl = resData.paymentUrl || `https://printe-frontend.onrender.com/checkout?orderId=${orderId}`;
+
+                    // Message 2: Order Details & TV Display Notice
+                    let otpMsg = `🖨️ *Cloud Print Order Created!*\n` +
+                                 `-----------------------------------\n` +
+                                 `📄 *File*: ${session.pending.filename}\n` +
+                                 `📊 *Pages*: ${resData.totalPages || 1} | *Type*: ${session.pending.printType}\n` +
+                                 `💰 *Total Amount*: ₹${(resData.estimatedTotal || estimatedTotal).toFixed(2)}\n` +
+                                 `📺 *Release OTP*: Displayed on *${session.blockLocation} TV Display Screen*\n` +
+                                 `📍 *Target Kiosk*: ${session.blockLocation}`;
+
+                    await sock.sendMessage(from, { text: otpMsg });
+
+                    // Message 3: Separate Payment Link
+                    let payMsg = `👉 *Click here to complete payment*:\n${paymentUrl}`;
+                    await sock.sendMessage(from, { text: payMsg });
+
+                    session.lastOrderId = orderId;
+                    session.lastOtp = otp;
+                    session.pending = null;
+                    session.step = 'IDLE';
+                    saveSessions(sessions);
                     return;
                 }
 
                 // Step: Confirming Order (YES / NO)
                 if (session.step === 'CONFIRM_ORDER') {
                     if (rawText === 'confirm_YES' || rawText === '1' || textLower === 'yes' || textLower === 'y' || textLower === 'ok') {
-                        await sock.sendMessage(from, { text: "⏳ *Creating your order and payment link... Please wait.*" });
-
-                        const buffer = Buffer.from(session.pending.bufferBase64, 'base64');
-                        const form = new FormData();
-                        form.append('file', buffer, { filename: session.pending.filename, contentType: session.pending.mimetype });
-                        form.append('customerName', `${pushName} (${senderPhone})`);
-                        form.append('phoneNumber', senderPhone);
-                        form.append('blockLocation', session.blockLocation);
-                        form.append('printType', session.pending.printType);
-
-                        let response;
-                        try {
-                            response = await axios.post(BACKEND_URL, form, { headers: form.getHeaders(), timeout: 30000 });
-                        } catch (primaryErr) {
-                            const fallbackUrl = 'https://printer-backend-1.onrender.com/api/bot/direct-upload';
-                            form.append('file', buffer, { filename: session.pending.filename, contentType: session.pending.mimetype });
-                            response = await axios.post(fallbackUrl, form, { headers: form.getHeaders(), timeout: 30000 });
-                        }
-
-                        const resData = response.data || {};
-                        const otp = resData.otp || '0001';
-                        const orderId = resData.orderId || 'ORD2026';
-                        const paymentUrl = resData.paymentUrl || `https://printe-frontend.onrender.com/checkout?orderId=${orderId}`;
-
-                        // Message 1: Order Details & TV Display Notice
-                        let otpMsg = `🖨️ *Cloud Print Order Created!*\n` +
-                                     `-----------------------------------\n` +
-                                     `📄 *File*: ${session.pending.filename}\n` +
-                                     `📊 *Pages*: ${resData.totalPages || 1} | *Type*: ${session.pending.printType}\n` +
-                                     `💰 *Total Amount*: ₹${(resData.estimatedTotal || session.pending.estimatedTotal).toFixed(2)}\n` +
-                                     `📺 *Release OTP*: Displayed on *${session.blockLocation} TV Display Screen*\n` +
-                                     `📍 *Target Kiosk*: ${session.blockLocation}`;
-
-                        await sock.sendMessage(from, { text: otpMsg });
-
-                        // Message 2: Separate Payment Link
-                        let payMsg = `👉 *Click here to complete payment*:\n${paymentUrl}`;
-                        await sock.sendMessage(from, { text: payMsg });
-
-                        session.pending = null;
-                        session.step = 'IDLE';
-                        saveSessions(sessions);
+                        // Logic moved to SELECT_PRINT_TYPE
                         return;
                     } else if (rawText === 'confirm_NO' || rawText === '2' || textLower === 'no' || textLower === 'n' || textLower === 'cancel') {
                         session.pending = null;

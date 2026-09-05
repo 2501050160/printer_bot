@@ -1,0 +1,6 @@
+{
+  "targetCollege": "",
+  "backendUrl": "https://printer-backend-kgzp.onrender.com",
+  "frontendUrl": "https://cloudprint.website",
+  "comment": "Set targetCollege to a college code (e.g. 'KLU', 'VIGNAN') for a dedicated college bot, or leave empty (\"\") for the Unified Multi-College Bot."
+}

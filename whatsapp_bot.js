@@ -20,7 +20,7 @@ const {
     fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 
-const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+const { PDFDocument, PageSizes, StandardFonts, rgb } = require('pdf-lib');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
 const QRCodeImage = require('qrcode');
@@ -32,30 +32,197 @@ const FormData = require('form-data');
 axios.defaults.headers.common['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 axios.defaults.headers.common['Accept'] = 'application/json, text/plain, */*';
 
-const BACKEND_URL = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
-const BACKEND_BASE = process.env.BACKEND_BASE_URL || 'https://printer-backend-kgzp.onrender.com';
-const FRONTEND_BASE = process.env.FRONTEND_URL || 'https://cloudprint.website';
+// Load optional bot_config.json if present
+let botConfigFile = {};
+const CONFIG_PATH = path.join(__dirname, 'bot_config.json');
+if (fs.existsSync(CONFIG_PATH)) {
+    try {
+        botConfigFile = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    } catch (e) {
+        console.warn('⚠️ Warning: Could not parse bot_config.json:', e.message);
+    }
+}
+
+// Parse optional CLI flag: node whatsapp_bot.js --college KLU
+let cliCollege = null;
+const collegeArgIdx = process.argv.indexOf('--college');
+if (collegeArgIdx !== -1 && process.argv[collegeArgIdx + 1]) {
+    cliCollege = process.argv[collegeArgIdx + 1].trim();
+}
+
+const TARGET_COLLEGE = (cliCollege || process.env.TARGET_COLLEGE || botConfigFile.targetCollege || '').trim();
+const IS_DEDICATED_BOT = Boolean(TARGET_COLLEGE);
+
+const BACKEND_BASE = process.env.BACKEND_BASE_URL || (botConfigFile.backendUrl ? botConfigFile.backendUrl.replace(/\/$/, '') : 'https://printer-backend-kgzp.onrender.com');
+const BACKEND_URL = process.env.BACKEND_URL || `${BACKEND_BASE}/api/bot/direct-upload`;
+const FRONTEND_BASE = process.env.FRONTEND_URL || botConfigFile.frontendUrl || 'https://cloudprint.website';
 const SESSIONS_FILE = path.join(__dirname, 'user_sessions.json');
+const PREFS_FILE = path.join(__dirname, 'user_prefs.json');
 const AUTH_DIR = path.join(__dirname, '.baileys_auth');
 
-console.log('⚡ Initializing Cloud Print WhatsApp Agent (Baileys Direct Engine)...');
+if (IS_DEDICATED_BOT) {
+    console.log(`🏫 [DEDICATED BOT MODE] Initializing WhatsApp Agent exclusively for: *${TARGET_COLLEGE}*`);
+} else {
+    console.log('🌐 [UNIFIED BOT MODE] Initializing WhatsApp Agent in Multi-Campus Discovery Mode...');
+}
+
+// In-Memory Session Store with Sliding TTL & Auto-Garbage Collection (0 Disk I/O Bottleneck)
+class SessionStore {
+    constructor(ttlMinutes = 20) {
+        this.ttlMs = ttlMinutes * 60 * 1000;
+        this.sessions = new Map();
+        this.bufferCache = new Map(); // JID -> { buffer, timestamp }
+        this.userPrefs = new Map(); // JID -> { college, blockLocation, realPhoneNumber }
+        this.loadPreferences();
+
+        // Background TTL cleanup every 2 minutes
+        setInterval(() => this.cleanupExpired(), 2 * 60 * 1000);
+    }
+
+    loadPreferences() {
+        try {
+            if (fs.existsSync(PREFS_FILE)) {
+                const data = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8'));
+                for (const [key, val] of Object.entries(data)) {
+                    this.userPrefs.set(key, val);
+                }
+            } else if (fs.existsSync(SESSIONS_FILE)) {
+                // Migrate permanent preferences from legacy user_sessions.json once
+                try {
+                    const legacy = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+                    for (const [key, val] of Object.entries(legacy)) {
+                        if (val.college || val.blockLocation || val.realPhoneNumber) {
+                            this.userPrefs.set(key, {
+                                college: val.college || null,
+                                blockLocation: val.blockLocation || null,
+                                realPhoneNumber: val.realPhoneNumber || val.phoneNumber || null
+                            });
+                        }
+                    }
+                    this.savePreferences();
+                    console.log(`✅ Migrated ${this.userPrefs.size} user preferences to lightweight user_prefs.json`);
+                } catch (migErr) {}
+            }
+        } catch (e) {
+            console.error('Failed to load user preferences:', e.message);
+        }
+    }
+
+    savePreferences() {
+        try {
+            const obj = {};
+            for (const [key, val] of this.userPrefs.entries()) {
+                obj[key] = val;
+            }
+            fs.writeFileSync(PREFS_FILE, JSON.stringify(obj, null, 2), 'utf8');
+        } catch (e) {
+            console.error('Failed to save user preferences:', e.message);
+        }
+    }
+
+    getSession(jid) {
+        let session = this.sessions.get(jid);
+        if (!session) {
+            const prefs = this.userPrefs.get(jid) || {};
+            session = {
+                jid,
+                phoneNumber: prefs.realPhoneNumber || null,
+                realPhoneNumber: prefs.realPhoneNumber || null,
+                name: 'Student',
+                college: IS_DEDICATED_BOT ? TARGET_COLLEGE : (prefs.college || null),
+                blockLocation: (IS_DEDICATED_BOT && prefs.college && prefs.college.toUpperCase() !== TARGET_COLLEGE.toUpperCase()) ? null : (prefs.blockLocation || null),
+                step: 'IDLE',
+                pending: null,
+                lastActivity: Date.now()
+            };
+            this.sessions.set(jid, session);
+        } else {
+            session.lastActivity = Date.now();
+            if (IS_DEDICATED_BOT && session.college !== TARGET_COLLEGE) {
+                session.college = TARGET_COLLEGE;
+            }
+        }
+        return session;
+    }
+
+    setSession(jid, session) {
+        if (!session) return;
+        session.lastActivity = Date.now();
+        this.sessions.set(jid, session);
+
+        // Update preferences if college or block changed
+        if (session.college || session.blockLocation || session.realPhoneNumber) {
+            const currentPrefs = this.userPrefs.get(jid) || {};
+            if (currentPrefs.college !== session.college ||
+                currentPrefs.blockLocation !== session.blockLocation ||
+                currentPrefs.realPhoneNumber !== session.realPhoneNumber) {
+                this.userPrefs.set(jid, {
+                    college: session.college || null,
+                    blockLocation: session.blockLocation || null,
+                    realPhoneNumber: session.realPhoneNumber || session.phoneNumber || null
+                });
+                this.savePreferences();
+            }
+        }
+    }
+
+    getAllSessions() {
+        const obj = {};
+        for (const [key, val] of this.sessions.entries()) {
+            obj[key] = val;
+        }
+        return obj;
+    }
+
+    setBuffer(jid, buffer) {
+        this.bufferCache.set(jid, { buffer, timestamp: Date.now() });
+    }
+
+    getBuffer(jid) {
+        const entry = this.bufferCache.get(jid);
+        return entry ? entry.buffer : null;
+    }
+
+    deleteBuffer(jid) {
+        this.bufferCache.delete(jid);
+    }
+
+    cleanupExpired() {
+        const now = Date.now();
+        // 1. Purge expired document buffers (>15 mins)
+        for (const [jid, entry] of this.bufferCache.entries()) {
+            if (now - entry.timestamp > 15 * 60 * 1000) {
+                this.bufferCache.delete(jid);
+            }
+        }
+
+        // 2. Reset abandoned chat states (>20 mins idle and not waiting for paid order)
+        for (const [jid, session] of this.sessions.entries()) {
+            if (session.lastOrderId && !session.notifiedCompletion) {
+                // Keep active if monitoring an active paid order
+                continue;
+            }
+            if (now - (session.lastActivity || 0) > this.ttlMs) {
+                if (session.step !== 'IDLE' || session.pending) {
+                    session.step = 'IDLE';
+                    session.pending = null;
+                    this.deleteBuffer(jid);
+                }
+            }
+        }
+    }
+}
+
+const sessionStore = new SessionStore(20);
 
 function loadSessions() {
-    try {
-        if (fs.existsSync(SESSIONS_FILE)) {
-            return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-        }
-    } catch (e) {
-        console.error('Failed to load user_sessions.json:', e);
-    }
-    return {};
+    return sessionStore.getAllSessions();
 }
 
 function saveSessions(sessions) {
-    try {
-        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2), 'utf8');
-    } catch (e) {
-        console.error('Failed to save user_sessions.json:', e);
+    if (!sessions) return;
+    for (const [jid, s] of Object.entries(sessions)) {
+        sessionStore.setSession(jid, s);
     }
 }
 
@@ -80,6 +247,17 @@ async function getCollegesAndBlocks() {
                     map[col].push(item.name);
                 }
             });
+
+            if (IS_DEDICATED_BOT) {
+                // Return only blocks for TARGET_COLLEGE (case-insensitive lookup)
+                const targetKey = Object.keys(map).find(k => k.trim().toUpperCase() === TARGET_COLLEGE.toUpperCase()) || TARGET_COLLEGE;
+                const dedicatedMap = {};
+                dedicatedMap[TARGET_COLLEGE] = map[targetKey] || [];
+                cachedCollegesMap = dedicatedMap;
+                lastCollegesFetchTime = now;
+                return dedicatedMap;
+            }
+
             cachedCollegesMap = map;
             lastCollegesFetchTime = now;
             return map;
@@ -89,6 +267,12 @@ async function getCollegesAndBlocks() {
     }
 
     if (cachedCollegesMap) return cachedCollegesMap;
+
+    if (IS_DEDICATED_BOT) {
+        return {
+            [TARGET_COLLEGE]: ["C Block"]
+        };
+    }
 
     return {
         "KLU": ["C Block"]
@@ -223,10 +407,200 @@ function isValidPageRange(rangeStr, totalPages) {
     }
 }
 
-function createUploadFormData(session, senderName, senderPhone) {
-    const buffer = Buffer.from(session.pending.bufferBase64, 'base64');
+async function transformPdfToNUp(inputBuffer, layoutMode = '2-UP') {
+    if (!layoutMode || layoutMode === '1-UP') {
+        return inputBuffer;
+    }
+
+    try {
+        const srcDoc = await PDFDocument.load(inputBuffer, { ignoreEncryption: true });
+        const srcPageCount = srcDoc.getPageCount();
+        if (srcPageCount === 0) return inputBuffer;
+
+        const newDoc = await PDFDocument.create();
+        const [a4Width, a4Height] = PageSizes.A4; // 595.28 x 841.89
+
+        // Embed all source pages
+        const embeddedPages = await newDoc.embedPages(srcDoc.getPages());
+
+        if (layoutMode === '2-UP') {
+            // 2-Up Mode: 2 slides per A4 Portrait page (top & bottom stacked)
+            // or 2 portrait pages per A4 Landscape page (left & right side-by-side)
+            const firstPage = srcDoc.getPage(0);
+            const isSourceLandscape = firstPage.getWidth() > firstPage.getHeight();
+
+            const sheetWidth = isSourceLandscape ? a4Width : a4Height;
+            const sheetHeight = isSourceLandscape ? a4Height : a4Width;
+
+            const margin = 20;
+            const gap = 14;
+
+            for (let i = 0; i < srcPageCount; i += 2) {
+                const page = newDoc.addPage([sheetWidth, sheetHeight]);
+
+                const slots = isSourceLandscape ? [
+                    // Top slot
+                    {
+                        x: margin,
+                        y: (sheetHeight / 2) + (gap / 2),
+                        w: sheetWidth - (2 * margin),
+                        h: (sheetHeight / 2) - margin - (gap / 2)
+                    },
+                    // Bottom slot
+                    {
+                        x: margin,
+                        y: margin,
+                        w: sheetWidth - (2 * margin),
+                        h: (sheetHeight / 2) - margin - (gap / 2)
+                    }
+                ] : [
+                    // Left slot
+                    {
+                        x: margin,
+                        y: margin,
+                        w: (sheetWidth / 2) - margin - (gap / 2),
+                        h: sheetHeight - (2 * margin)
+                    },
+                    // Right slot
+                    {
+                        x: (sheetWidth / 2) + (gap / 2),
+                        y: margin,
+                        w: (sheetWidth / 2) - margin - (gap / 2),
+                        h: sheetHeight - (2 * margin)
+                    }
+                ];
+
+                // Render Page 1 of pair
+                drawPageInSlot(page, embeddedPages[i], slots[0]);
+
+                // Render Page 2 of pair (if available)
+                if (i + 1 < srcPageCount) {
+                    drawPageInSlot(page, embeddedPages[i + 1], slots[1]);
+                }
+
+                // Draw subtle divider line
+                if (isSourceLandscape) {
+                    page.drawLine({
+                        start: { x: margin, y: sheetHeight / 2 },
+                        end: { x: sheetWidth - margin, y: sheetHeight / 2 },
+                        thickness: 0.5,
+                        color: rgb(0.8, 0.8, 0.8),
+                        dashArray: [4, 4]
+                    });
+                } else {
+                    page.drawLine({
+                        start: { x: sheetWidth / 2, y: margin },
+                        end: { x: sheetWidth / 2, y: sheetHeight - margin },
+                        thickness: 0.5,
+                        color: rgb(0.8, 0.8, 0.8),
+                        dashArray: [4, 4]
+                    });
+                }
+            }
+        } else if (layoutMode === '4-UP') {
+            // 4-Up Mode: 4 slides in a 2x2 grid
+            const firstPage = srcDoc.getPage(0);
+            const isSourceLandscape = firstPage.getWidth() > firstPage.getHeight();
+
+            const sheetWidth = isSourceLandscape ? a4Height : a4Width; // 841.89 x 595.28 for landscape slides
+            const sheetHeight = isSourceLandscape ? a4Width : a4Height;
+
+            const margin = 16;
+            const gap = 12;
+            const cellW = (sheetWidth - (2 * margin) - gap) / 2;
+            const cellH = (sheetHeight - (2 * margin) - gap) / 2;
+
+            for (let i = 0; i < srcPageCount; i += 4) {
+                const page = newDoc.addPage([sheetWidth, sheetHeight]);
+
+                const slots = [
+                    // Top-Left (Row 1, Col 1)
+                    { x: margin, y: margin + cellH + gap, w: cellW, h: cellH },
+                    // Top-Right (Row 1, Col 2)
+                    { x: margin + cellW + gap, y: margin + cellH + gap, w: cellW, h: cellH },
+                    // Bottom-Left (Row 2, Col 1)
+                    { x: margin, y: margin, w: cellW, h: cellH },
+                    // Bottom-Right (Row 2, Col 2)
+                    { x: margin + cellW + gap, y: margin, w: cellW, h: cellH }
+                ];
+
+                for (let j = 0; j < 4; j++) {
+                    if (i + j < srcPageCount) {
+                        drawPageInSlot(page, embeddedPages[i + j], slots[j]);
+                    }
+                }
+
+                // Grid dividers
+                page.drawLine({
+                    start: { x: margin, y: sheetHeight / 2 },
+                    end: { x: sheetWidth - margin, y: sheetHeight / 2 },
+                    thickness: 0.5,
+                    color: rgb(0.8, 0.8, 0.8),
+                    dashArray: [3, 3]
+                });
+                page.drawLine({
+                    start: { x: sheetWidth / 2, y: margin },
+                    end: { x: sheetWidth / 2, y: sheetHeight - margin },
+                    thickness: 0.5,
+                    color: rgb(0.8, 0.8, 0.8),
+                    dashArray: [3, 3]
+                });
+            }
+        }
+
+        const outputBytes = await newDoc.save();
+        return Buffer.from(outputBytes);
+    } catch (err) {
+        console.error('transformPdfToNUp error, fallback to original buffer:', err.message);
+        return inputBuffer;
+    }
+}
+
+function drawPageInSlot(page, embeddedPage, slot) {
+    const pW = embeddedPage.width;
+    const pH = embeddedPage.height;
+
+    // Calculate scale factor while maintaining aspect ratio
+    const scale = Math.min(slot.w / pW, slot.h / pH);
+    const drawW = pW * scale;
+    const drawH = pH * scale;
+
+    // Center within slot
+    const posX = slot.x + (slot.w - drawW) / 2;
+    const posY = slot.y + (slot.h - drawH) / 2;
+
+    // Draw subtle border around slide tile
+    page.drawRectangle({
+        x: posX,
+        y: posY,
+        width: drawW,
+        height: drawH,
+        borderColor: rgb(0.85, 0.85, 0.85),
+        borderWidth: 0.75,
+        color: undefined // transparent fill
+    });
+
+    // Draw embedded page
+    page.drawPage(embeddedPage, {
+        x: posX,
+        y: posY,
+        width: drawW,
+        height: drawH
+    });
+}
+
+async function createUploadFormData(session, senderName, senderPhone) {
+    let buffer = sessionStore.getBuffer(session.jid || senderPhone) ||
+                 (session.pending?.bufferBase64 ? Buffer.from(session.pending.bufferBase64, 'base64') : null);
+
+    // Apply Student Saver N-Up transformation if selected
+    if (buffer && session.pending && session.pending.layoutMode && session.pending.layoutMode !== '1-UP' && !session.pending.isImage) {
+        console.log(`📑 Transforming document to ${session.pending.layoutMode} Layout for student ${senderPhone}...`);
+        buffer = await transformPdfToNUp(buffer, session.pending.layoutMode);
+    }
+
     const form = new FormData();
-    form.append('file', buffer, { filename: session.pending.filename, contentType: session.pending.mimetype });
+    form.append('file', buffer, { filename: session.pending.filename, contentType: session.pending.mimetype || 'application/pdf' });
     form.append('customerName', `${senderName} (${senderPhone})`);
     form.append('phoneNumber', senderPhone);
     form.append('blockLocation', session.blockLocation || 'Campus Kiosk');
@@ -632,10 +1006,11 @@ async function processOrderCreationAndPayment(sock, jid, session, senderName, se
 
     let resData;
     try {
-        const remoteForm = createUploadFormData(session, senderName, senderPhone);
+        const remoteForm = await createUploadFormData(session, senderName, senderPhone);
         const targetUrl = process.env.BACKEND_URL || 'https://printer-backend-kgzp.onrender.com/api/bot/direct-upload';
         const response = await axios.post(targetUrl, remoteForm, { headers: remoteForm.getHeaders(), timeout: 300000 });
         resData = response.data || {};
+        sessionStore.deleteBuffer(session.jid || senderPhone);
     } catch (remoteErr) {
         console.error("Order creation failed on backend:", remoteErr.message);
         session.pending = null;
@@ -1072,17 +1447,37 @@ async function handleIncomingMessage(msg) {
         if (textLower === 'cancel' || textLower === 'cancel order' || textLower === '/cancel') {
             if (session.lastOrderId) {
                 const targetId = session.lastOrderId;
-                const wasPaid = Boolean(session.paymentNotified);
+                let wasPaid = false;
+                let actualPrice = session.lastPrice || 0.0;
+
+                try {
+                    const chk = await axios.get(`${BACKEND_BASE}/api/pdf/details?orderId=${targetId}`, { timeout: 4000 });
+                    if (chk.data) {
+                        const pStatus = (chk.data.paymentStatus || '').toUpperCase();
+                        if (pStatus === 'PAID' || chk.data.paidViaWallet) {
+                            wasPaid = true;
+                        }
+                        if (chk.data.price) actualPrice = Number(chk.data.price);
+                    }
+                } catch (e) {
+                    wasPaid = Boolean(session.paidTimestamp && session.paymentNotified);
+                }
+
+                // Call backend cancel if endpoint is available
+                try {
+                    await axios.post(`${BACKEND_BASE}/api/pdf/cancelOrder?orderId=${targetId}`, null, { timeout: 4000 });
+                } catch (e) {}
 
                 session.lastOrderId = null;
                 session.lastOtp = null;
                 session.paymentNotified = false;
+                session.paidTimestamp = null;
                 session.pending = null;
                 session.step = 'IDLE';
                 saveSessions(sessions);
 
-                if (wasPaid) {
-                    const refundVal = session.lastPrice || 4.0;
+                if (wasPaid && actualPrice > 0) {
+                    const refundVal = actualPrice;
                     const couponCode = await generateRefundCoupon(refundVal);
                     const refundMsg = `❌ *Order ${targetId} Cancelled!*\n\n` +
                                       `🎟️ *PRINT REFUND COUPON GENERATED*:\n` +
@@ -1097,7 +1492,7 @@ async function handleIncomingMessage(msg) {
 
                     await sock.sendMessage(jid, { text: refundMsg });
                 } else {
-                    await sock.sendMessage(jid, { text: `❌ *Unpaid Order ${targetId} Cancelled!*\n\nYou can attach and send a new document to print anytime.` });
+                    await sock.sendMessage(jid, { text: `❌ *Unpaid Order ${targetId} Cancelled!*\n\nNo payment was made, so no charges were applied. You can attach and send a new document to print anytime.` });
                 }
                 return;
             } else if (session.pending) {
@@ -1318,6 +1713,15 @@ async function handleIncomingMessage(msg) {
 
         // Secret Admin command "CC" to reset / change college (hidden from regular user menus)
         if (textLower === 'cc' || textLower === '/cc' || textLower.includes('change college') || textLower.includes('change shop')) {
+            if (IS_DEDICATED_BOT) {
+                await sock.sendMessage(jid, {
+                    text: `ℹ️ *This WhatsApp Bot is exclusively dedicated to ${TARGET_COLLEGE} Campus.*\n\n` +
+                          `• If you need to switch your active printer inside *${TARGET_COLLEGE}*, reply *"CB"*\n` +
+                          `• If you want to print at another university campus, please use the central *Unified Cloud Print Bot*.`
+                });
+                return;
+            }
+
             session.college = null;
             session.blockLocation = null;
             session.pending = null;
@@ -1354,7 +1758,15 @@ async function handleIncomingMessage(msg) {
             }
         }
 
-        // 1. College Selection
+        // 1. College Selection (Bypassed if running in Dedicated College Mode)
+        if (IS_DEDICATED_BOT) {
+            session.college = TARGET_COLLEGE;
+            if (session.step === 'SELECT_COLLEGE') {
+                session.step = 'SELECT_BLOCK';
+                saveSessions(sessions);
+            }
+        }
+
         if (!session.college) {
             let chosenCollege = null;
 
@@ -1421,9 +1833,11 @@ async function handleIncomingMessage(msg) {
         if (session.step === 'SELECT_BLOCK' || !session.blockLocation) {
             const blocks = collegesMap[session.college] || [];
             if (blocks.length === 0) {
-                await sock.sendMessage(jid, {
-                    text: `⚠️ *No Online Printers Found in ${session.college || 'Selected Campus'}!*\n\nAll printers in this campus are currently offline or under maintenance.\n\nReply *"CC"* to switch college/shop or check back soon!`
-                });
+                const offlineNotice = IS_DEDICATED_BOT
+                    ? `⚠️ *No Online Printers Found in ${session.college}!* \n\nAll printers in this campus are currently offline or under maintenance.\n\nPlease check back shortly, or reply *"CB"* to refresh.`
+                    : `⚠️ *No Online Printers Found in ${session.college || 'Selected Campus'}!*\n\nAll printers in this campus are currently offline or under maintenance.\n\nReply *"CC"* to switch college/shop or check back soon!`;
+
+                await sock.sendMessage(jid, { text: offlineNotice });
                 return;
             }
 
@@ -1482,10 +1896,14 @@ async function handleIncomingMessage(msg) {
                 session.step = 'SELECT_BLOCK';
                 saveSessions(sessions);
 
+                const menuTitle = IS_DEDICATED_BOT
+                    ? `👋 Welcome to ${TARGET_COLLEGE} Cloud Print!`
+                    : `🟢 Online Kiosks (${session.college})`;
+
                 await sendSmartMenu(
                     sock,
                     jid,
-                    `🟢 Online Kiosks (${session.college})`,
+                    menuTitle,
                     'Please select an active, online kiosk block below:',
                     'Select Kiosk Block',
                     blocks.map(b => `🟢 📍 ${b}`)
@@ -1618,12 +2036,15 @@ async function handleIncomingMessage(msg) {
                 if (parsed >= 1) initialCopies = parsed;
             }
 
+            // Store document buffer in in-memory bufferCache with TTL
+            sessionStore.setBuffer(jid, buffer);
+
             session.pending = {
                 filename,
                 mimetype: isImage ? (mimetype.startsWith('image/') ? mimetype : 'image/jpeg') : mimetype,
                 isImage,
-                bufferBase64: buffer.toString('base64'),
                 totalPages,
+                layoutMode: '1-UP',
                 selectedPages: 'ALL',
                 doubleSided: false,
                 printType: 'BW',
@@ -1637,61 +2058,41 @@ async function handleIncomingMessage(msg) {
             session.pending.isColorSupported = isColorSupported;
 
             if (isImage) {
-                if (isColorSupported) {
-                    await sendSmartMenu(
-                        sock,
-                        jid,
-                        `🖼️ Photo Received: ${filename}`,
-                        `📷 *Photo / Image (1 Page)*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print this photo?`,
-                        'Select Print Option',
-                        [
-                            '📄 Single Sided B&W Print (₹2.00)',
-                            '🎨 Color Print (₹5.00)',
-                            '⚙️ Customize Copies & Settings'
-                        ]
-                    );
-                } else {
-                    await sendSmartMenu(
-                        sock,
-                        jid,
-                        `🖼️ Photo Received: ${filename}`,
-                        `📷 *Photo / Image (1 Page)*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print this photo?`,
-                        'Select Print Option',
-                        [
-                            '📄 Single Sided B&W Print (₹2.00)',
-                            '⚙️ Customize Copies & Settings'
-                        ]
-                    );
-                }
+                const imgOptions = isColorSupported
+                    ? ['📄 Single Sided B&W Print (₹2.00)', '🎨 Color Print (₹5.00)', '⚙️ Customize Copies & Settings']
+                    : ['📄 Single Sided B&W Print (₹2.00)', '⚙️ Customize Copies & Settings'];
+                await sendSmartMenu(
+                    sock,
+                    jid,
+                    `🖼️ Photo Received: ${filename}`,
+                    `📷 *Photo / Image (1 Page)*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print this photo?`,
+                    'Select Print Option',
+                    imgOptions
+                );
             } else {
-                if (isColorSupported) {
-                    await sendSmartMenu(
-                        sock,
-                        jid,
-                        `📄 Document Received: ${filename}`,
-                        `📊 Total Pages Detected: *${totalPages}*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print?`,
-                        'Select Print Mode',
-                        [
-                            '📄 Single Sided Black & White Print (₹2/pg)',
-                            '📑 Double Sided Black & White Print (₹1.50/pg)',
-                            '🎨 Color Print (₹5/pg)',
-                            '⚙️ Customize Section (Custom Pages, Copies, etc.)'
-                        ]
-                    );
-                } else {
-                    await sendSmartMenu(
-                        sock,
-                        jid,
-                        `📄 Document Received: ${filename}`,
-                        `📊 Total Pages Detected: *${totalPages}*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print?`,
-                        'Select Print Mode',
-                        [
-                            '📄 Single Sided Black & White Print (₹2/pg)',
-                            '📑 Double Sided Black & White Print (₹1.50/pg)',
-                            '⚙️ Customize Section (Custom Pages, Copies, etc.)'
-                        ]
-                    );
+                const docOptions = [
+                    '📄 Single Sided B&W Print (₹2/pg)',
+                    '📑 Double Sided B&W Print (₹1.50/pg)'
+                ];
+                if (totalPages >= 2) {
+                    docOptions.push('📑 2 Slides/Page (50% Saver - ₹1/slide)');
                 }
+                if (totalPages >= 4) {
+                    docOptions.push('📑 4 Slides/Page (75% Super Saver - ₹0.50/slide)');
+                }
+                if (isColorSupported) {
+                    docOptions.push('🎨 Color Print (₹5/pg)');
+                }
+                docOptions.push('⚙️ Customize Section (Custom Pages, Copies, Layout)');
+
+                await sendSmartMenu(
+                    sock,
+                    jid,
+                    `📄 Document Received: ${filename}`,
+                    `📊 Total Pages Detected: *${totalPages}*\n📍 Target Kiosk: *${session.blockLocation}* (${session.college})\n\nHow would you like to print?`,
+                    'Select Print Mode',
+                    docOptions
+                );
             }
             return;
         }
@@ -1851,8 +2252,92 @@ async function handleIncomingMessage(msg) {
                     return;
                 }
 
-                // Option 3 (Color Print when supported)
-                if (isColorSupported && (textLower.includes('color') || textLower.includes('colour') || textLower === '3')) {
+                const totalPgs = session.pending.totalPages || 1;
+
+                // Option: 2 Slides per Page (50% Saver)
+                if (!session.pending.isImage && (textLower.includes('2 slide') || textLower.includes('2-up') || textLower.includes('2 in 1') || textLower.includes('2-in-1') || textLower.includes('50%') || (totalPgs >= 2 && textLower === '3'))) {
+                    session.pending.layoutMode = '2-UP';
+                    session.pending.selectedPages = 'ALL';
+                    session.pending.doubleSided = true;
+                    session.pending.printType = 'BW';
+                    session.pending.copies = 1;
+
+                    const effectivePages = Math.ceil(totalPgs / 2.0);
+                    const sheets = Math.ceil(effectivePages / 2.0);
+                    const rate = 1.50; // ₹1.50 per duplex sheet
+                    const estimatedTotal = effectivePages === 1 ? 2.00 : sheets * rate;
+                    session.pending.estimatedTotal = estimatedTotal;
+
+                    let userBalance = session.walletBalance || 0.0;
+                    try {
+                        const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 10000 });
+                        if (balRes.data && balRes.data.balance !== undefined) {
+                            userBalance = parseFloat(balRes.data.balance) || 0.0;
+                            session.walletBalance = userBalance;
+                            saveSessions(sessions);
+                        }
+                    } catch (e) {}
+
+                    const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
+                        `📄 File: *${session.pending.filename}*\n` +
+                        `📊 Original Slides: *${totalPgs}* (Range: ALL)\n` +
+                        `📑 Layout: *2 Slides per Page (📑 50% Saver)*\n` +
+                        `🖨️ Physical Sheets: *${sheets} Sheet(s)* (${effectivePages} pages on paper)\n` +
+                        `📑 Sides: *Double Sided (Duplex)*\n` +
+                        `🎨 Mode: *Black & White*\n` +
+                        `🔢 Copies: *1*\n` +
+                        `📍 Kiosk: *${session.blockLocation}* (${session.college})\n` +
+                        `💰 Total Amount: *₹${estimatedTotal.toFixed(2)}* *(50% Student Discount Applied)*\n` +
+                        `💳 Wallet Balance: *₹${userBalance.toFixed(2)}*`;
+
+                    await sock.sendMessage(jid, { text: summaryText });
+                    await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal, sessions);
+                    return;
+                }
+
+                // Option: 4 Slides per Page (75% Super Saver)
+                if (!session.pending.isImage && (textLower.includes('4 slide') || textLower.includes('4-up') || textLower.includes('4 in 1') || textLower.includes('4-in-1') || textLower.includes('75%') || (totalPgs >= 4 && (textLower === '4' || textLower === '4up')))) {
+                    session.pending.layoutMode = '4-UP';
+                    session.pending.selectedPages = 'ALL';
+                    session.pending.doubleSided = true;
+                    session.pending.printType = 'BW';
+                    session.pending.copies = 1;
+
+                    const effectivePages = Math.ceil(totalPgs / 4.0);
+                    const sheets = Math.ceil(effectivePages / 2.0);
+                    const rate = 1.50; // ₹1.50 per duplex sheet
+                    const estimatedTotal = effectivePages === 1 ? 2.00 : sheets * rate;
+                    session.pending.estimatedTotal = estimatedTotal;
+
+                    let userBalance = session.walletBalance || 0.0;
+                    try {
+                        const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 10000 });
+                        if (balRes.data && balRes.data.balance !== undefined) {
+                            userBalance = parseFloat(balRes.data.balance) || 0.0;
+                            session.walletBalance = userBalance;
+                            saveSessions(sessions);
+                        }
+                    } catch (e) {}
+
+                    const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
+                        `📄 File: *${session.pending.filename}*\n` +
+                        `📊 Original Slides: *${totalPgs}* (Range: ALL)\n` +
+                        `📑 Layout: *4 Slides per Page (📑 75% Super Saver)*\n` +
+                        `🖨️ Physical Sheets: *${sheets} Sheet(s)* (${effectivePages} pages on paper)\n` +
+                        `📑 Sides: *Double Sided (Duplex)*\n` +
+                        `🎨 Mode: *Black & White*\n` +
+                        `🔢 Copies: *1*\n` +
+                        `📍 Kiosk: *${session.blockLocation}* (${session.college})\n` +
+                        `💰 Total Amount: *₹${estimatedTotal.toFixed(2)}* *(75% Student Discount Applied)*\n` +
+                        `💳 Wallet Balance: *₹${userBalance.toFixed(2)}*`;
+
+                    await sock.sendMessage(jid, { text: summaryText });
+                    await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal, sessions);
+                    return;
+                }
+
+                // Option: Color Print (when supported)
+                if (isColorSupported && (textLower.includes('color') || textLower.includes('colour') || (totalPgs < 2 && textLower === '3') || (totalPgs >= 2 && totalPgs < 4 && textLower === '4') || (totalPgs >= 4 && textLower === '5'))) {
                     const colorCheck = await checkKioskPrinterStatus(session.blockLocation, 'COLOR');
                     if (!colorCheck.available) {
                         await sock.sendMessage(jid, {
@@ -1895,10 +2380,12 @@ async function handleIncomingMessage(msg) {
                     return;
                 }
 
-                // Customize Section (Option 3 for B&W-only, or Option 4 for Color-enabled, or text 'custom')
-                const isCustomizeChoice = (!isColorSupported && (textLower.includes('custom') || textLower === '3')) ||
-                                         (isColorSupported && (textLower.includes('custom') || textLower === '4')) ||
-                                         textLower.includes('custom');
+                // Customize Section
+                const isCustomizeChoice = textLower.includes('custom') || textLower.includes('setting') ||
+                                         (textLower === '6') ||
+                                         (!isColorSupported && totalPgs >= 4 && textLower === '5') ||
+                                         (!isColorSupported && totalPgs >= 2 && totalPgs < 4 && textLower === '4') ||
+                                         (!isColorSupported && totalPgs < 2 && textLower === '3');
 
                 if (isCustomizeChoice) {
                     if (session.pending.isImage) {
@@ -2073,8 +2560,11 @@ async function handleIncomingMessage(msg) {
                 // Check paper availability for requested copies
                 const isImage = Boolean(session.pending?.isImage);
                 const pageCount = isImage ? 1 : countPagesFromRange(session.pending?.selectedPages, session.pending?.totalPages);
+                let effectivePages = pageCount;
+                if (session.pending?.layoutMode === '2-UP') effectivePages = Math.ceil(pageCount / 2.0);
+                else if (session.pending?.layoutMode === '4-UP') effectivePages = Math.ceil(pageCount / 4.0);
                 const div = session.pending?.doubleSided ? 2.0 : 1.0;
-                const sheetsPerCopy = Math.ceil(pageCount / div);
+                const sheetsPerCopy = Math.ceil(effectivePages / div);
                 const totalSheetsNeeded = sheetsPerCopy * c;
 
                 const availablePaper = await getKioskPaperCount(session.blockLocation);
@@ -2100,37 +2590,13 @@ async function handleIncomingMessage(msg) {
                 }
 
                 session.pending.copies = c;
-                await showOrderSummary(sock, jid, session, sessions, senderPhone);
+                await showOrderSummary(sock, jid, session, sessions, senderPhone, senderName);
                 return;
             }
 
             if (session.step === 'CONFIRM_ORDER') {
-                const printerCheck = await checkKioskPrinterStatus(session.blockLocation, session.pending?.printType || 'BW');
-                if (!printerCheck.available) {
-                    session.pending = null;
-                    session.step = 'SELECT_BLOCK';
-                    saveSessions(sessions);
-                    await sock.sendMessage(jid, {
-                        text: `⚠️ *Kiosk Offline Alert*:\nYour selected kiosk (*${session.blockLocation}*) is currently offline, unassigned, or under maintenance.\n\n🚫 *Order cannot be placed for this block at this moment.*\n\nPlease choose an active online kiosk below to proceed with your print:`
-                    });
-                    const collegesMap = await getCollegesAndBlocks();
-                    const blocks = collegesMap[session.college] || [];
-                    if (blocks.length > 0) {
-                        await sendSmartMenu(
-                            sock,
-                            jid,
-                            `🟢 Available Online Kiosks (${session.college || 'Campus'})`,
-                            'Please select an active online kiosk below:',
-                            'Select Kiosk Block',
-                            blocks.map(b => `🟢 📍 ${b}`)
-                        );
-                    }
-                    return;
-                }
-
-                const userBal = session.pending?.userBalance || 0.0;
                 const totalAmt = session.pending?.estimatedTotal || 0.0;
-                const isCancel = textLower.includes('cancel') || (userBal >= totalAmt && textLower === '3') || (userBal < totalAmt && textLower === '2');
+                const isCancel = textLower.includes('cancel') || textLower === '2' || textLower === 'no' || textLower === 'quit';
 
                 if (isCancel) {
                     session.pending = null;
@@ -2145,7 +2611,7 @@ async function handleIncomingMessage(msg) {
             }
         }
 
-        // Friendly Chat AI Response
+        // Friendly small talk for idle responses
         const friendlyReply = getFriendlyChatResponse(textLower, rawText, senderName, session);
         await sock.sendMessage(jid, { text: friendlyReply });
 
@@ -2154,13 +2620,24 @@ async function handleIncomingMessage(msg) {
     }
 }
 
-async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
+async function showOrderSummary(sock, jid, session, sessions, senderPhone, senderName) {
     const isImage = Boolean(session.pending.isImage);
-    const pageCount = isImage ? 1 : countPagesFromRange(session.pending.selectedPages, session.pending.totalPages);
+    const rawPageCount = isImage ? 1 : countPagesFromRange(session.pending.selectedPages, session.pending.totalPages);
+    const layoutMode = session.pending.layoutMode || '1-UP';
+    let effectivePages = rawPageCount;
+    let layoutLabel = '1 Slide per Page (Standard)';
+    if (layoutMode === '2-UP') {
+        effectivePages = Math.ceil(rawPageCount / 2.0);
+        layoutLabel = '2 Slides per Page (📑 50% Saver)';
+    } else if (layoutMode === '4-UP') {
+        effectivePages = Math.ceil(rawPageCount / 4.0);
+        layoutLabel = '4 Slides per Page (📑 75% Super Saver)';
+    }
+
     const rate = session.pending.printType === 'COLOR' ? 5.0 : (session.pending.doubleSided ? 1.50 : 2.0);
     const div = session.pending.doubleSided ? 2.0 : 1.0;
-    const paperSheets = Math.ceil(pageCount / div);
-    const originalTotal = (session.pending.doubleSided && pageCount === 1) ? 2.00 : paperSheets * (session.pending.copies || 1) * rate;
+    const paperSheets = Math.ceil(effectivePages / div);
+    const originalTotal = (session.pending.doubleSided && effectivePages === 1) ? 2.00 : paperSheets * (session.pending.copies || 1) * rate;
 
     let discountAmount = 0.0;
     let appliedCoupon = null;
@@ -2184,27 +2661,6 @@ async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
     } catch (e) {}
 
     session.pending.userBalance = userBalance;
-    session.step = 'CONFIRM_ORDER';
-    saveSessions(sessions);
-
-    const isFreeWithCoupon = estimatedTotal <= 0.0 && discountAmount > 0;
-    const hasEnoughWallet = userBalance >= estimatedTotal;
-    const menuOptions = isFreeWithCoupon
-        ? [
-            '🎉 Confirm Free Print (Covered 100% by Coupon)',
-            '❌ Cancel Order'
-          ]
-        : (hasEnoughWallet
-            ? [
-                `💳 Pay via Wallet Balance (Available: ₹${userBalance.toFixed(2)})`,
-                '🌐 Pay Online via Razorpay Link',
-                '❌ Cancel Order'
-              ]
-            : [
-                '✅ Confirm & Pay (Get Razorpay Link)',
-                '❌ Cancel Order'
-              ]
-          );
 
     let priceSummary = `💰 Total Amount: *₹${estimatedTotal.toFixed(2)}*\n`;
     if (discountAmount > 0) {
@@ -2215,7 +2671,9 @@ async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
 
     const summaryText = `*📋 Cloud Print Order Summary*\n\n` +
         `📄 File: *${session.pending.filename}*\n` +
-        (isImage ? `🖼️ Type: *Photo / Image (1 Page)*\n` : `📊 Pages: *${pageCount}* (Range: ${session.pending.selectedPages})\n`) +
+        (isImage ? `🖼️ Type: *Photo / Image (1 Page)*\n` : `📊 Document Pages: *${rawPageCount}* (Range: ${session.pending.selectedPages})\n` +
+         (layoutMode !== '1-UP' ? `📑 Layout: *${layoutLabel}*\n` : '') +
+         `🖨️ Physical Sheets: *${paperSheets} sheet(s)* (${effectivePages} pages on paper)\n`) +
         (isImage ? `` : `📑 Sides: *${session.pending.doubleSided ? 'Both Sides (Duplex)' : 'Single Sided'}*\n`) +
         `🎨 Mode: *${session.pending.printType === 'COLOR' ? 'Color (₹5/pg)' : 'Black & White (₹2/pg)'}*\n` +
         `🔢 Copies: *${session.pending.copies || 1}*\n` +
@@ -2223,14 +2681,11 @@ async function showOrderSummary(sock, jid, session, sessions, senderPhone) {
         priceSummary +
         `💳 Wallet Balance: *₹${userBalance.toFixed(2)}*`;
 
-    await sendSmartMenu(
-        sock,
-        jid,
-        '📋 Cloud Print Order Summary',
-        summaryText,
-        'Select Payment Option',
-        menuOptions
-    );
+    // 1. Send Order Summary
+    await sock.sendMessage(jid, { text: summaryText });
+
+    // 2. Directly create order on server and send Razorpay Payment Link or Wallet Confirmation
+    await processOrderCreationAndPayment(sock, jid, session, senderName, senderPhone, estimatedTotal, sessions);
 }
 
 let orderMonitoringInterval = null;
@@ -2415,37 +2870,46 @@ function startOrderMonitoring() {
                             updated = true;
                         }
 
-                        // 8. Timeout Expiry / Cancellation Notification with 7-Day Refund Coupon
+                        // 8. Timeout Expiry / Cancellation Notification with 7-Day Refund Coupon (ONLY for PAID orders)
                         if ((data.status === 'CANCELLED' || data.status === 'EXPIRED' || data.status === 'FAILED') && !session.notifiedCancelled && !session.notifiedCompletion && !session.otpReleased) {
-                            const refundVal = data.price || session.lastPrice || 2.0;
-                            const refundNum = typeof refundVal === 'number' ? refundVal : (parseFloat(refundVal) || 2.0);
-                            const couponCode = await generateRefundCoupon(refundNum);
+                            const isPaid = (data.paymentStatus === 'PAID' || Boolean(session.paidTimestamp && session.paymentNotified));
+                            const refundVal = data.price || session.lastPrice || 0.0;
+                            const refundNum = typeof refundVal === 'number' ? refundVal : (parseFloat(refundVal) || 0.0);
 
-                            const statusTitle = data.status === 'FAILED' 
-                                ? `⚠️ *Print Job Error for Order ${session.lastOrderId}*`
-                                : `⏰ *Order ${session.lastOrderId} Expired / Cancelled*`;
+                            if (isPaid && refundNum > 0) {
+                                const couponCode = await generateRefundCoupon(refundNum);
 
-                            const statusDesc = data.status === 'FAILED'
-                                ? `Our kiosk encountered an issue while printing your pages.`
-                                : `The release OTP was not entered at the kiosk within the time limit.`;
+                                const statusTitle = data.status === 'FAILED' 
+                                    ? `⚠️ *Print Job Error for Order ${session.lastOrderId}*`
+                                    : `⏰ *Order ${session.lastOrderId} Expired / Cancelled*`;
 
-                            const msgText = `${statusTitle}\n\n` +
-                                            `${statusDesc}\n\n` +
-                                            `🎟️ *100% REFUND COUPON GENERATED*:\n` +
-                                            `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                                            `💰 *Refund Value*: *₹${refundNum.toFixed(2)}*\n` +
-                                            `🏷️ *Coupon Code*: *${couponCode}*\n` +
-                                            `⏰ *Validity*: *7 Days* (Single Use Only)\n` +
-                                            `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                                            `💡 *How to Redeem*:\n` +
-                                            `1. Reply *"COUPON ${couponCode}"* right here in WhatsApp to add ₹${refundNum.toFixed(2)} to your wallet balance instantly!\n` +
-                                            `2. Or enter code *${couponCode}* on the checkout page of your next order.`;
+                                const statusDesc = data.status === 'FAILED'
+                                    ? `Our kiosk encountered an issue while printing your pages.`
+                                    : `The release OTP was not entered at the kiosk within the time limit.`;
 
-                            await sock.sendMessage(targetJid, { text: msgText });
+                                const msgText = `${statusTitle}\n\n` +
+                                                `${statusDesc}\n\n` +
+                                                `🎟️ *100% REFUND COUPON GENERATED*:\n` +
+                                                `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                                                `💰 *Refund Value*: *₹${refundNum.toFixed(2)}*\n` +
+                                                `🏷️ *Coupon Code*: *${couponCode}*\n` +
+                                                `⏰ *Validity*: *7 Days* (Single Use Only)\n` +
+                                                `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+                                                `💡 *How to Redeem*:\n` +
+                                                `1. Reply *"COUPON ${couponCode}"* right here in WhatsApp to add ₹${refundNum.toFixed(2)} to your wallet balance instantly!\n` +
+                                                `2. Or enter code *${couponCode}* on the checkout page of your next order.`;
+
+                                await sock.sendMessage(targetJid, { text: msgText });
+                            } else {
+                                const timeoutMsg = `⏰ *Unpaid Order ${session.lastOrderId} Cancelled*\n\n` +
+                                                   `Your print order was cancelled because payment was not completed within the time limit. No charges were applied. You can attach a new document to print anytime!`;
+                                await sock.sendMessage(targetJid, { text: timeoutMsg });
+                            }
                             session.lastOrderId = null;
                             session.lastOtp = null;
                             session.printingNotified = false;
                             session.paymentNotified = false;
+                            session.paidTimestamp = null;
                             session.notifiedCancelled = true;
                             updated = true;
                         }

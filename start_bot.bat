@@ -10,7 +10,13 @@ if not exist node_modules (
     echo Installing dependencies...
     call npm install
 )
-echo Launching WhatsApp Bot Agent (Render Backend)...
-npm start
+
+if "%1"=="" (
+    echo Launching WhatsApp Bot Agent...
+    node whatsapp_bot.js
+) else (
+    echo Launching Dedicated WhatsApp Bot Agent for %1...
+    node whatsapp_bot.js --college %1
+)
 pause
 

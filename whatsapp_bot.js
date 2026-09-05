@@ -53,12 +53,34 @@ if (collegeArgIdx !== -1 && process.argv[collegeArgIdx + 1]) {
 const TARGET_COLLEGE = (cliCollege || process.env.TARGET_COLLEGE || botConfigFile.targetCollege || '').trim();
 const IS_DEDICATED_BOT = Boolean(TARGET_COLLEGE);
 
+const shouldResetLogin = process.argv.includes('--reset-login') || process.argv.includes('--logout') || process.env.RESET_LOGIN === 'true';
+const isQuietMode = process.argv.includes('--quiet') || process.argv.includes('--no-logs') || process.env.QUIET === 'true';
+if (isQuietMode) {
+    const rawLog = console.log;
+    console.log = (...args) => {
+        const text = args.map(a => (typeof a === 'string' ? a : '')).join(' ');
+        if (text.includes('QR CODE') || text.includes('Connected') || text.includes('Ready') || text.includes('Error') || text.includes('BOT MODE') || text.includes('SCAN THIS')) {
+            rawLog(...args);
+        }
+    };
+}
+
 const BACKEND_BASE = process.env.BACKEND_BASE_URL || (botConfigFile.backendUrl ? botConfigFile.backendUrl.replace(/\/$/, '') : 'https://printer-backend-kgzp.onrender.com');
 const BACKEND_URL = process.env.BACKEND_URL || `${BACKEND_BASE}/api/bot/direct-upload`;
 const FRONTEND_BASE = process.env.FRONTEND_URL || botConfigFile.frontendUrl || 'https://cloudprint.website';
 const SESSIONS_FILE = path.join(__dirname, 'user_sessions.json');
-const PREFS_FILE = path.join(__dirname, 'user_prefs.json');
-const AUTH_DIR = path.join(__dirname, '.baileys_auth');
+const PREFS_FILE = TARGET_COLLEGE ? path.join(__dirname, `user_prefs_${TARGET_COLLEGE.toLowerCase()}.json`) : path.join(__dirname, 'user_prefs.json');
+const AUTH_DIR = TARGET_COLLEGE ? path.join(__dirname, `.baileys_auth_${TARGET_COLLEGE.toLowerCase()}`) : path.join(__dirname, '.baileys_auth');
+
+if (shouldResetLogin && fs.existsSync(AUTH_DIR)) {
+    console.log(`🧹 Removing login credentials directory: ${AUTH_DIR}...`);
+    try {
+        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        console.log('✅ WhatsApp login credentials removed! A fresh QR code will be generated.\n');
+    } catch (e) {
+        console.warn('⚠️ Could not remove auth directory:', e.message);
+    }
+}
 
 if (IS_DEDICATED_BOT) {
     console.log(`🏫 [DEDICATED BOT MODE] Initializing WhatsApp Agent exclusively for: *${TARGET_COLLEGE}*`);

@@ -267,6 +267,106 @@ function saveSessions(sessions) {
     }
 }
 
+// ==========================================
+// Spam & Rate Limit Protection (Cooldown Mode)
+// ==========================================
+// Track invalid attempts per contact: JID -> { invalidCount: number, cooldownUntil: number }
+const spamTracker = new Map();
+
+function isContactInCooldown(jid) {
+    if (!jid) return false;
+    const tracker = spamTracker.get(jid);
+    if (!tracker || !tracker.cooldownUntil) return false;
+    if (Date.now() < tracker.cooldownUntil) {
+        return true;
+    }
+    // 10-minute cooldown expired: reset
+    tracker.cooldownUntil = 0;
+    tracker.invalidCount = 0;
+    return false;
+}
+
+function resetInvalidCount(jid) {
+    if (!jid) return;
+    const tracker = spamTracker.get(jid);
+    if (tracker) {
+        tracker.invalidCount = 0;
+    }
+}
+
+async function recordInvalidAttempt(sock, jid, failureNotice) {
+    if (!jid) return false;
+    let tracker = spamTracker.get(jid);
+    if (!tracker) {
+        tracker = { invalidCount: 0, cooldownUntil: 0 };
+        spamTracker.set(jid, tracker);
+    }
+    // If previous cooldown expired
+    if (tracker.cooldownUntil && Date.now() >= tracker.cooldownUntil) {
+        tracker.invalidCount = 0;
+        tracker.cooldownUntil = 0;
+    }
+
+    tracker.invalidCount = (tracker.invalidCount || 0) + 1;
+    console.warn(`⚠️ [RATE LIMIT] Contact ${jid} triggered invalid response (${tracker.invalidCount}/5).`);
+
+    if (tracker.invalidCount >= 5) {
+        tracker.cooldownUntil = Date.now() + 10 * 60 * 1000; // 10 minutes cooldown
+        tracker.invalidCount = 0;
+        console.warn(`⛔ [COOLDOWN TRIGGERED] Contact ${jid} placed in 10-minute cooldown.`);
+        try {
+            await sock.sendMessage(jid, {
+                text: `⛔ *Account Temporarily Paused (5/5 Invalid Attempts)*\n\n` +
+                      `You have exceeded the maximum of 5 invalid attempts.\n\n` +
+                      `⏳ *Cooldown Active*: *10 Minutes*\n` +
+                      `To maintain kiosk stability, the bot will *not reply* to any messages from this contact for the next 10 minutes.\n\n` +
+                      `Please wait 10 minutes and try again with a valid file or command.`
+            });
+        } catch (e) {}
+        return true; // Cooldown activated!
+    }
+
+    const remaining = 5 - tracker.invalidCount;
+    const suffix = `\n\n⚠️ *(Attempt ${tracker.invalidCount}/5 — ${remaining} attempts remaining before 10-minute cooldown)*`;
+    if (typeof failureNotice === 'string') {
+        try {
+            await sock.sendMessage(jid, { text: failureNotice + suffix });
+        } catch (e) {}
+    } else if (typeof failureNotice === 'function') {
+        try {
+            await failureNotice(suffix);
+        } catch (e) {}
+    }
+    return false;
+}
+
+function isRecognizedFriendlyIntent(textLower) {
+    if (!textLower) return false;
+    const greetings = /^(hi|hello|hilo|hey|heya|hola|good morning|good afternoon|good evening|namaste|sup|what's up|greetings|start|menu)\b/i;
+    const moodWeather = /rain|hot|cold|sunny|weather|tired|sleepy|hungry|morning|evening|night|day/i;
+    const compliments = /love|smart|intelligent|best|cool|awesome|nice|good bot|sweet/i;
+    const support = /paper jam|refund|stuck|failed|money|problem|issue|error|support/i;
+    const howAreYou = /how are you|how do you do|hru|how's it going/i;
+    const pricing = /price|cost|rate|tariff|how much|amount|charge|fee/i;
+    const help = /help|how to|how it works|guide|instruction|step|process/i;
+    const thanks = /thank|thanks|thx|ty|awesome|great|cool|perfect|good job|nice/i;
+    const location = /where|location|kiosk|place|shop|address|block/i;
+    const identity = /who are you|what are you|your name|bot|ai/i;
+    const commands = /^(cancel|receipt|invoice|bill|status|balance|cb|cc|alert)\b/i;
+
+    return greetings.test(textLower) ||
+           moodWeather.test(textLower) ||
+           compliments.test(textLower) ||
+           support.test(textLower) ||
+           howAreYou.test(textLower) ||
+           pricing.test(textLower) ||
+           help.test(textLower) ||
+           thanks.test(textLower) ||
+           location.test(textLower) ||
+           identity.test(textLower) ||
+           commands.test(textLower);
+}
+
 let cachedCollegesMap = null;
 let lastCollegesFetchTime = 0;
 
@@ -1439,6 +1539,15 @@ async function handleIncomingMessage(msg) {
         const jid = msg.key.remoteJid;
         if (!jid || jid.endsWith('@g.us') || jid === 'status@broadcast') return;
 
+        // Rate limit cooldown check: Do not reply to this contact for 10 minutes if placed in cooldown
+        if (isContactInCooldown(jid)) {
+            const tracker = spamTracker.get(jid);
+            const remainingSec = Math.max(1, Math.ceil((tracker.cooldownUntil - Date.now()) / 1000));
+            const remainingMin = Math.ceil(remainingSec / 60);
+            console.log(`⏳ [COOLDOWN ACTIVE] Dropping incoming message from ${jid} (${remainingMin}m / ${remainingSec}s remaining).`);
+            return;
+        }
+
         const senderPhone = extractPhoneNumber(msg, jid);
         const senderName = msg.pushName || 'Student';
         const messageContent = msg.message;
@@ -1476,6 +1585,7 @@ async function handleIncomingMessage(msg) {
             session.realPhoneNumber = clean10;
             session.phoneNumber = clean10;
             session.step = session.pending ? 'SELECT_OPTIONS' : 'IDLE';
+            resetInvalidCount(jid);
             saveSessions(sessions);
 
             await sock.sendMessage(jid, { 
@@ -1541,6 +1651,7 @@ async function handleIncomingMessage(msg) {
             );
 
             if (session.step === 'ASK_RECEIPT' && isNegative) {
+                resetInvalidCount(jid);
                 await sock.sendMessage(jid, { text: "🥰 *Thank you for using Cloud Print!* Have a wonderful day! 🖨️✨" });
                 session.step = 'IDLE';
                 session.lastOrderId = null;
@@ -1556,7 +1667,8 @@ async function handleIncomingMessage(msg) {
             }
 
             if (isAffirmative) {
-                const orderData = session.completedOrderData || (session.lastOrderId ? {
+                resetInvalidCount(jid);
+                let orderData = session.completedOrderData || (session.lastOrderId ? {
                     orderId: session.lastOrderId,
                     fileName: 'Document.pdf',
                     totalPages: session.lastPages || 1,
@@ -1571,6 +1683,34 @@ async function handleIncomingMessage(msg) {
                     paymentMethod: 'WhatsApp Cloud Print',
                     paidAt: Date.now()
                 } : null);
+
+                // Fallback: If not in memory, query latest completed order directly from backend database!
+                if (!orderData && effectivePhone) {
+                    try {
+                        const orderRes = await axios.get(`${BACKEND_BASE}/api/bot/latest-order?phoneNumber=${effectivePhone}`, { timeout: 6000 });
+                        if (orderRes.data && orderRes.data.orderId) {
+                            const dbOrder = orderRes.data;
+                            orderData = {
+                                orderId: dbOrder.orderId,
+                                fileName: dbOrder.fileName || 'Document.pdf',
+                                totalPages: dbOrder.totalPages || 1,
+                                printType: dbOrder.printType || 'BW',
+                                doubleSided: Boolean(dbOrder.doubleSided),
+                                copies: dbOrder.copies || 1,
+                                price: dbOrder.price || 0,
+                                originalPrice: dbOrder.originalPrice || dbOrder.price || 0,
+                                discountAmount: dbOrder.discountAmount || 0,
+                                blockLocation: dbOrder.blockLocation || session.blockLocation || 'Campus Kiosk',
+                                transactionId: dbOrder.transactionId || 'WALLET_PAYMENT',
+                                paymentMethod: dbOrder.orderChannel || 'WhatsApp Cloud Print',
+                                paidAt: dbOrder.paymentTime || Date.now()
+                            };
+                            console.log(`🧾 Retrieved latest order from database for receipt: ${orderData.orderId}`);
+                        }
+                    } catch (fetchErr) {
+                        console.warn(`Could not fetch latest order from DB for receipt:`, fetchErr.message);
+                    }
+                }
 
                 if (orderData) {
                     await sock.sendMessage(jid, { text: "📄 *Generating your Official PDF Payment Receipt...* Please wait a moment! ⏳" });
@@ -1609,7 +1749,7 @@ async function handleIncomingMessage(msg) {
                         return;
                     }
                 } else {
-                    await sock.sendMessage(jid, { text: "⚠️ No recent completed order found to generate a receipt." });
+                    await sock.sendMessage(jid, { text: "⚠️ No recent completed order found to generate a receipt. Please print a document first!" });
                     session.step = 'IDLE';
                     session.lastOrderId = null;
                     session.lastOtp = null;
@@ -1940,20 +2080,61 @@ async function handleIncomingMessage(msg) {
             }
         }
 
-        // 1. College Selection (Bypassed if running in Dedicated College Mode)
+        // 1. College Resolution & Auto-Lock
         if (IS_DEDICATED_BOT) {
             session.college = TARGET_COLLEGE;
-            if (session.step === 'SELECT_COLLEGE') {
-                session.step = 'SELECT_BLOCK';
-                saveSessions(sessions);
+        }
+
+        // Auto-lock if only 1 college is configured in the entire system (e.g. KLU)
+        if (!session.college && collegeList.length === 1) {
+            session.college = collegeList[0];
+            console.log(`🏫 [AUTO-LOCK] Only 1 college configured (${session.college}). Auto-locked for user.`);
+        }
+
+        // Check user preferences
+        if (!session.college) {
+            const prefs = sessionStore.userPrefs.get(jid) || {};
+            if (prefs.college && (collegeList.length === 0 || collegeList.includes(prefs.college))) {
+                session.college = prefs.college;
             }
         }
+
+        // Check database via user-balance API
+        if (!session.college && effectivePhone) {
+            try {
+                const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${effectivePhone}`, { timeout: 3000 });
+                if (balRes.data && balRes.data.college && balRes.data.college !== 'UNIFIED') {
+                    session.college = balRes.data.college;
+                    console.log(`🏫 [AUTO-LOCK] Loaded registered college (${session.college}) from database for +91 ${effectivePhone}`);
+                }
+            } catch (e) {}
+        }
+
+        // If college is now resolved, save it permanently
+        if (session.college) {
+            sessionStore.userPrefs.set(jid, {
+                college: session.college,
+                blockLocation: session.blockLocation || null,
+                realPhoneNumber: session.realPhoneNumber || effectivePhone
+            });
+            sessionStore.savePreferences();
+
+            if (session.step === 'SELECT_COLLEGE') {
+                session.step = session.blockLocation ? 'IDLE' : 'SELECT_BLOCK';
+                saveSessions(sessions);
+            }
+            if (effectivePhone) {
+                axios.post(`${BACKEND_BASE}/api/bot/set-user-college?phoneNumber=${effectivePhone}&college=${encodeURIComponent(session.college)}`, null, { timeout: 3000 }).catch(() => {});
+            }
+        }
+
+        const isGreeting = /^(hi|hello|hilo|hey|heya|hola|good morning|good afternoon|good evening|namaste|sup|what's up|greetings|start|menu)\b/i.test(textLower);
 
         if (!session.college) {
             let chosenCollege = null;
 
-            if (session.step === 'SELECT_COLLEGE') {
-                const found = collegeList.find(c => textLower.includes(c.toLowerCase()) || rawText.includes(c));
+            if (session.step === 'SELECT_COLLEGE' && !isGreeting) {
+                const found = collegeList.find(c => textLower === c.toLowerCase() || rawText.toUpperCase() === c.toUpperCase() || textLower.includes(c.toLowerCase()));
                 if (found) chosenCollege = found;
                 else {
                     const num = parseInt(rawText, 10);
@@ -1966,12 +2147,28 @@ async function handleIncomingMessage(msg) {
             if (chosenCollege && collegesMap[chosenCollege]) {
                 session.college = chosenCollege;
                 session.step = 'SELECT_BLOCK';
+                resetInvalidCount(jid);
                 saveSessions(sessions);
+
+                // Persist college selection to DB
+                if (effectivePhone) {
+                    axios.post(`${BACKEND_BASE}/api/bot/set-user-college?phoneNumber=${effectivePhone}&college=${encodeURIComponent(chosenCollege)}`, null, { timeout: 3000 }).catch(() => {});
+                }
 
                 const blocks = collegesMap[chosenCollege] || [];
                 if (blocks.length === 0) {
                     await sock.sendMessage(jid, {
                         text: `⚠️ *All Kiosks in ${chosenCollege} are Currently Offline!*\n\nOur system detected that all printers in *${chosenCollege}* are currently inactive or under maintenance.\n\nPlease try again shortly, or reply *"CC"* to choose another campus/print shop.`
+                    });
+                    return;
+                }
+
+                if (blocks.length === 1) {
+                    session.blockLocation = blocks[0];
+                    session.step = 'IDLE';
+                    saveSessions(sessions);
+                    await sock.sendMessage(jid, {
+                        text: `✅ *Campus Connected: ${chosenCollege}*\n📍 *Active Kiosk*: *${session.blockLocation}* (🟢 Online & Ready)\n\n📎 *To Print*: Simply attach and send any **PDF document or Image** right here!`
                     });
                     return;
                 }
@@ -1985,17 +2182,20 @@ async function handleIncomingMessage(msg) {
                     blocks.map(b => `🟢 📍 ${b}`)
                 );
                 return;
-            } else if (session.step === 'SELECT_COLLEGE') {
-                await sendSmartMenu(
-                    sock,
-                    jid,
-                    '⚠️ Invalid Choice',
-                    `Please select a valid College / Print Shop number (1 to ${collegeList.length}) or reply with the college name below:`,
-                    'Select College / Shop',
-                    collegeList.map(c => `🏫 ${c}`)
-                );
+            } else if (session.step === 'SELECT_COLLEGE' && !isGreeting) {
+                await recordInvalidAttempt(sock, jid, async (warningSuffix) => {
+                    await sendSmartMenu(
+                        sock,
+                        jid,
+                        '⚠️ Invalid Choice',
+                        `Please select a valid College / Print Shop number (1 to ${collegeList.length}) or reply with the college name below:${warningSuffix}`,
+                        'Select College / Shop',
+                        collegeList.map(c => `🏫 ${c}`)
+                    );
+                });
                 return;
             } else {
+                resetInvalidCount(jid);
                 session.step = 'SELECT_COLLEGE';
                 saveSessions(sessions);
 
@@ -2012,8 +2212,17 @@ async function handleIncomingMessage(msg) {
         }
 
         // 2. Kiosk Block Selection
+        const blocks = collegesMap[session.college] || [];
+
+        // Auto-lock if single kiosk block in campus
+        if (!session.blockLocation && blocks.length === 1) {
+            session.blockLocation = blocks[0];
+            session.step = 'IDLE';
+            saveSessions(sessions);
+            console.log(`📍 [AUTO-LOCK] Single kiosk block detected (${session.blockLocation}). Auto-locked for user.`);
+        }
+
         if (session.step === 'SELECT_BLOCK' || !session.blockLocation) {
-            const blocks = collegesMap[session.college] || [];
             if (blocks.length === 0) {
                 const offlineNotice = IS_DEDICATED_BOT
                     ? `⚠️ *No Online Printers Found in ${session.college}!* \n\nAll printers in this campus are currently offline or under maintenance.\n\nPlease check back shortly, or reply *"CB"* to refresh.`
@@ -2023,74 +2232,86 @@ async function handleIncomingMessage(msg) {
                 return;
             }
 
-            let chosenBlock = null;
+            if (blocks.length === 1) {
+                session.blockLocation = blocks[0];
+                session.step = 'IDLE';
+                saveSessions(sessions);
+            } else {
+                let chosenBlock = null;
 
-            const found = blocks.find(b => textLower.includes(b.toLowerCase()) || rawText.includes(b));
-            if (found) chosenBlock = found;
-            else {
-                const num = parseInt(rawText, 10);
-                if (!isNaN(num) && num >= 1 && num <= blocks.length) {
-                    chosenBlock = blocks[num - 1];
+                if (!isGreeting) {
+                    const found = blocks.find(b => textLower === b.toLowerCase() || rawText.toUpperCase() === b.toUpperCase() || textLower.includes(b.toLowerCase()));
+                    if (found) chosenBlock = found;
+                    else {
+                        const num = parseInt(rawText, 10);
+                        if (!isNaN(num) && num >= 1 && num <= blocks.length) {
+                            chosenBlock = blocks[num - 1];
+                        }
+                    }
                 }
-            }
 
-            if (chosenBlock && blocks.includes(chosenBlock)) {
-                // Real-time live check before confirming block
-                const status = await checkKioskPrinterStatus(chosenBlock, 'BW');
-                if (!status.available) {
-                    await sock.sendMessage(jid, {
-                        text: `⚠️ *Kiosk Offline Alert*:\n${status.message}\n\nPlease choose an active online kiosk block from below:`
-                    });
+                if (chosenBlock && blocks.includes(chosenBlock)) {
+                    // Real-time live check before confirming block
+                    const status = await checkKioskPrinterStatus(chosenBlock, 'BW');
+                    if (!status.available) {
+                        await sock.sendMessage(jid, {
+                            text: `⚠️ *Kiosk Offline Alert*:\n${status.message}\n\nPlease choose an active online kiosk block from below:`
+                        });
+                        await sendSmartMenu(
+                            sock,
+                            jid,
+                            `🟢 Available Online Kiosks (${session.college})`,
+                            'Please select an active, operational kiosk below:',
+                            'Select Online Kiosk',
+                            blocks.map(b => `🟢 📍 ${b}`)
+                        );
+                        return;
+                    }
+
+                    resetInvalidCount(jid);
+                    session.blockLocation = chosenBlock;
+                    session.step = 'IDLE';
+                    saveSessions(sessions);
+
                     await sendSmartMenu(
                         sock,
                         jid,
-                        `🟢 Available Online Kiosks (${session.college})`,
-                        'Please select an active, operational kiosk below:',
-                        'Select Online Kiosk',
+                        `✅ Verified Online Kiosk: ${chosenBlock}`,
+                        `Campus: *${session.college}*\nPrinter Status: 🟢 **ONLINE & READY**\n\n🖨️ Simply attach and send your **PDF file or Image** to start your print order!`,
+                        'Ready to Print'
+                    );
+                    return;
+                } else if (session.step === 'SELECT_BLOCK' && !isGreeting) {
+                    await recordInvalidAttempt(sock, jid, async (warningSuffix) => {
+                        await sendSmartMenu(
+                            sock,
+                            jid,
+                            `⚠️ Invalid Choice (${session.college})`,
+                            `Please select a valid online kiosk number (1 to ${blocks.length}) below:${warningSuffix}`,
+                            'Select Kiosk Block',
+                            blocks.map(b => `🟢 📍 ${b}`)
+                        );
+                    });
+                    return;
+                } else {
+                    resetInvalidCount(jid);
+                    session.step = 'SELECT_BLOCK';
+                    saveSessions(sessions);
+
+                    const menuTitle = IS_DEDICATED_BOT
+                        ? `👋 Welcome to ${TARGET_COLLEGE} Cloud Print!`
+                        : `🟢 Online Kiosks (${session.college})`;
+
+                    await sendSmartMenu(
+                        sock,
+                        jid,
+                        menuTitle,
+                        'Please select an active, online kiosk block below:',
+                        'Select Kiosk Block',
                         blocks.map(b => `🟢 📍 ${b}`)
                     );
                     return;
                 }
-
-                session.blockLocation = chosenBlock;
-                session.step = 'IDLE';
-                saveSessions(sessions);
-
-                await sendSmartMenu(
-                    sock,
-                    jid,
-                    `✅ Verified Online Kiosk: ${chosenBlock}`,
-                    `Campus: *${session.college}*\nPrinter Status: 🟢 **ONLINE & READY**\n\n🖨️ Simply attach and send your **PDF file or Image** to start your print order!`,
-                    'Ready to Print'
-                );
-                return;
-            } else if (session.step === 'SELECT_BLOCK') {
-                await sendSmartMenu(
-                    sock,
-                    jid,
-                    `⚠️ Invalid Choice (${session.college})`,
-                    `Please select a valid online kiosk number (1 to ${blocks.length}) below:`,
-                    'Select Kiosk Block',
-                    blocks.map(b => `🟢 📍 ${b}`)
-                );
-                return;
-            } else {
-                session.step = 'SELECT_BLOCK';
-                saveSessions(sessions);
-
-                const menuTitle = IS_DEDICATED_BOT
-                    ? `👋 Welcome to ${TARGET_COLLEGE} Cloud Print!`
-                    : `🟢 Online Kiosks (${session.college})`;
-
-                await sendSmartMenu(
-                    sock,
-                    jid,
-                    menuTitle,
-                    'Please select an active, online kiosk block below:',
-                    'Select Kiosk Block',
-                    blocks.map(b => `🟢 📍 ${b}`)
-                );
-                return;
             }
         }
 
@@ -2099,6 +2320,7 @@ async function handleIncomingMessage(msg) {
         const imgMsg = messageContent?.imageMessage;
 
         if (docMsg || imgMsg) {
+            resetInvalidCount(jid);
             // Verify user is not blocked
             try {
                 const balRes = await axios.get(`${BACKEND_BASE}/api/bot/user-balance?phoneNumber=${senderPhone}`, { timeout: 4000 });
@@ -2610,16 +2832,17 @@ async function handleIncomingMessage(msg) {
                 }
 
                 // Invalid selection
-                if (isColorSupported) {
-                    await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with:\n• *1* for Single Sided B&W Print (₹2/pg)\n• *2* for Double Sided B&W Print (₹1.50/pg)\n• *3* for Color Print (₹5/pg)\n• *4* for Customize Section` });
-                } else {
-                    await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with:\n• *1* for Single Sided B&W Print (₹2/pg)\n• *2* for Double Sided B&W Print (₹1.50/pg)\n• *3* for Customize Section` });
-                }
+                await recordInvalidAttempt(sock, jid, 
+                    isColorSupported
+                        ? `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with:\n• *1* for Single Sided B&W Print (₹2/pg)\n• *2* for Double Sided B&W Print (₹1.50/pg)\n• *3* for Color Print (₹5/pg)\n• *4* for Customize Section`
+                        : `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with:\n• *1* for Single Sided B&W Print (₹2/pg)\n• *2* for Double Sided B&W Print (₹1.50/pg)\n• *3* for Customize Section`
+                );
                 return;
             }
 
             if (session.step === 'SELECT_PAGE_OPTION') {
                 if (textLower.includes('all') || textLower === '1') {
+                    resetInvalidCount(jid);
                     session.pending.selectedPages = 'ALL';
                     session.step = 'SELECT_SIDES';
                     saveSessions(sessions);
@@ -2634,24 +2857,24 @@ async function handleIncomingMessage(msg) {
                     );
                     return;
                 } else if (textLower.includes('custom') || textLower === '2') {
+                    resetInvalidCount(jid);
                     session.step = 'ENTER_CUSTOM_RANGE';
                     saveSessions(sessions);
                     await sock.sendMessage(jid, { text: `🔢 *Enter Custom Page Range*:\n\nReply with your start and end page e.g. *"1-${session.pending.totalPages}"* or *"1,2"* (Total pages: ${session.pending.totalPages}):` });
                     return;
                 } else {
-                    await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with *1* for All Pages or *2* for Custom Page Range.` });
+                    await recordInvalidAttempt(sock, jid, `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with *1* for All Pages or *2* for Custom Page Range.`);
                     return;
                 }
             }
 
             if (session.step === 'ENTER_CUSTOM_RANGE') {
                 if (!isValidPageRange(rawText, session.pending.totalPages)) {
-                    await sock.sendMessage(jid, {
-                        text: `⚠️ *Invalid Page Range ("${rawText}")!*\n\nTotal pages in file: *${session.pending.totalPages}*.\nPlease reply with a valid range between *1* and *${session.pending.totalPages}* e.g. *"1-${session.pending.totalPages}"* or *"1,2"*.`
-                    });
+                    await recordInvalidAttempt(sock, jid, `⚠️ *Invalid Page Range ("${rawText}")!*\n\nTotal pages in file: *${session.pending.totalPages}*.\nPlease reply with a valid range between *1* and *${session.pending.totalPages}* e.g. *"1-${session.pending.totalPages}"* or *"1,2"*.`);
                     return;
                 }
 
+                resetInvalidCount(jid);
                 session.pending.selectedPages = rawText.trim();
                 session.step = 'SELECT_SIDES';
                 saveSessions(sessions);
@@ -2669,6 +2892,7 @@ async function handleIncomingMessage(msg) {
 
             if (session.step === 'SELECT_SIDES') {
                 if (textLower.includes('single') || textLower === '1') {
+                    resetInvalidCount(jid);
                     session.pending.doubleSided = false;
                     session.step = 'SELECT_COLOR';
                     saveSessions(sessions);
@@ -2683,6 +2907,7 @@ async function handleIncomingMessage(msg) {
                     );
                     return;
                 } else if (textLower.includes('both') || textLower.includes('duplex') || textLower === '2') {
+                    resetInvalidCount(jid);
                     session.pending.doubleSided = true;
                     session.step = 'SELECT_COLOR';
                     saveSessions(sessions);
@@ -2697,13 +2922,14 @@ async function handleIncomingMessage(msg) {
                     );
                     return;
                 } else {
-                    await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with *1* for Single Sided or *2* for Both Sides / Duplex.` });
+                    await recordInvalidAttempt(sock, jid, `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with *1* for Single Sided or *2* for Both Sides / Duplex.`);
                     return;
                 }
             }
 
             if (session.step === 'SELECT_COLOR') {
                 if (textLower.includes('bw') || textLower.includes('black') || textLower.includes('b&w') || textLower.includes('b/w') || textLower === '1') {
+                    resetInvalidCount(jid);
                     session.pending.printType = 'BW';
                     session.step = 'ENTER_COPIES';
                     saveSessions(sessions);
@@ -2718,6 +2944,7 @@ async function handleIncomingMessage(msg) {
                         });
                         return;
                     }
+                    resetInvalidCount(jid);
                     session.pending.printType = 'COLOR';
                     session.pending.doubleSided = false;
                     session.step = 'ENTER_COPIES';
@@ -2726,7 +2953,7 @@ async function handleIncomingMessage(msg) {
                     await sock.sendMessage(jid, { text: `🔢 *Number of Copies*:\n\nReply with any number of copies you need (e.g. *1*, *2*, *5*, *10*, *25*, *50*, *100*, etc.):` });
                     return;
                 } else {
-                    await sock.sendMessage(jid, { text: `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with *1* for Black & White (₹2/pg) or *2* for Color (₹5/pg).` });
+                    await recordInvalidAttempt(sock, jid, `⚠️ *Invalid Choice ("${rawText}")!*\n\nPlease reply with *1* for Black & White (₹2/pg) or *2* for Color (₹5/pg).`);
                     return;
                 }
             }
@@ -2735,9 +2962,11 @@ async function handleIncomingMessage(msg) {
                 const match = rawText.match(/\b\d+\b/) || rawText.match(/\d+/);
                 const c = match ? parseInt(match[0], 10) : 0;
                 if (c < 1) {
-                    await sock.sendMessage(jid, { text: `⚠️ *Please reply with a valid number of copies* (e.g. *1*, *2*, *5*, *10*, *20*, *50*, etc.):` });
+                    await recordInvalidAttempt(sock, jid, `⚠️ *Please reply with a valid number of copies* (e.g. *1*, *2*, *5*, *10*, *20*, *50*, etc.):`);
                     return;
                 }
+
+                resetInvalidCount(jid);
 
                 // Check paper availability for requested copies
                 const isImage = Boolean(session.pending?.isImage);
@@ -2780,6 +3009,8 @@ async function handleIncomingMessage(msg) {
                 const totalAmt = session.pending?.estimatedTotal || 0.0;
                 const isCancel = textLower.includes('cancel') || textLower === '2' || textLower === 'no' || textLower === 'quit';
 
+                resetInvalidCount(jid);
+
                 if (isCancel) {
                     session.pending = null;
                     session.step = 'IDLE';
@@ -2793,9 +3024,24 @@ async function handleIncomingMessage(msg) {
             }
         }
 
-        // Friendly small talk for idle responses
-        const friendlyReply = getFriendlyChatResponse(textLower, rawText, senderName, session);
-        await sock.sendMessage(jid, { text: friendlyReply });
+        // Friendly small talk for idle responses or unknown message rate limiting
+        if (isRecognizedFriendlyIntent(textLower)) {
+            resetInvalidCount(jid);
+            const friendlyReply = getFriendlyChatResponse(textLower, rawText, senderName, session);
+            await sock.sendMessage(jid, { text: friendlyReply });
+        } else {
+            await recordInvalidAttempt(sock, jid, 
+                `❓ *Unrecognized Message or Command ("${rawText}")*\n\n` +
+                `I'm your campus Cloud Print Assistant. I didn't recognize that command.\n\n` +
+                `📎 *To Print*: Attach and send any **PDF or Image** right here!\n` +
+                `💡 *Helpful Commands*:\n` +
+                `• *hi* - Welcome greeting & kiosk status\n` +
+                `• *receipt* - Official PDF receipt for your last print\n` +
+                `• *block* - View online printers / switch kiosk\n` +
+                `• *price* - View per-page pricing schedule\n` +
+                `• *help* - Step-by-step instructions`
+            );
+        }
 
     } catch (error) {
         console.error("FULL WhatsApp message error:", error);

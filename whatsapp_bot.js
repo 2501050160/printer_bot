@@ -43,15 +43,26 @@ if (fs.existsSync(CONFIG_PATH)) {
     }
 }
 
-// Parse optional CLI flag: node whatsapp_bot.js --college KLU
+// Parse optional CLI flags
 let cliCollege = null;
 const collegeArgIdx = process.argv.indexOf('--college');
 if (collegeArgIdx !== -1 && process.argv[collegeArgIdx + 1]) {
     cliCollege = process.argv[collegeArgIdx + 1].trim();
 }
 
-const TARGET_COLLEGE = (cliCollege || process.env.TARGET_COLLEGE || botConfigFile.targetCollege || '').trim();
-const IS_DEDICATED_BOT = Boolean(TARGET_COLLEGE);
+let cliKey = null;
+const keyArgIdx = process.argv.indexOf('--key');
+if (keyArgIdx !== -1 && process.argv[keyArgIdx + 1]) {
+    cliKey = process.argv[keyArgIdx + 1].trim();
+}
+
+let BOT_API_KEY = (cliKey || process.env.BOT_API_KEY || botConfigFile.botApiKey || '').trim();
+let TARGET_COLLEGE = (cliCollege || process.env.TARGET_COLLEGE || botConfigFile.targetCollege || '').trim().toUpperCase();
+let IS_DEDICATED_BOT = Boolean(TARGET_COLLEGE);
+
+if (BOT_API_KEY) {
+    axios.defaults.headers.common['X-Bot-Api-Key'] = BOT_API_KEY;
+}
 
 const shouldResetLogin = process.argv.includes('--reset-login') || process.argv.includes('--logout') || process.env.RESET_LOGIN === 'true';
 const isQuietMode = process.argv.includes('--quiet') || process.argv.includes('--no-logs') || process.env.QUIET === 'true';
@@ -69,8 +80,16 @@ const BACKEND_BASE = process.env.BACKEND_BASE_URL || (botConfigFile.backendUrl ?
 const BACKEND_URL = process.env.BACKEND_URL || `${BACKEND_BASE}/api/bot/direct-upload`;
 const FRONTEND_BASE = process.env.FRONTEND_URL || botConfigFile.frontendUrl || 'https://cloudprint.website';
 const SESSIONS_FILE = path.join(__dirname, 'user_sessions.json');
-const PREFS_FILE = TARGET_COLLEGE ? path.join(__dirname, `user_prefs_${TARGET_COLLEGE.toLowerCase()}.json`) : path.join(__dirname, 'user_prefs.json');
-const AUTH_DIR = TARGET_COLLEGE ? path.join(__dirname, `.baileys_auth_${TARGET_COLLEGE.toLowerCase()}`) : path.join(__dirname, '.baileys_auth');
+
+function getAuthDir() {
+    return TARGET_COLLEGE ? path.join(__dirname, `.baileys_auth_${TARGET_COLLEGE.toLowerCase()}`) : path.join(__dirname, '.baileys_auth');
+}
+function getPrefsFile() {
+    return TARGET_COLLEGE ? path.join(__dirname, `user_prefs_${TARGET_COLLEGE.toLowerCase()}.json`) : path.join(__dirname, 'user_prefs.json');
+}
+
+let AUTH_DIR = getAuthDir();
+let PREFS_FILE = getPrefsFile();
 
 if (shouldResetLogin && fs.existsSync(AUTH_DIR)) {
     console.log(`🧹 Removing login credentials directory: ${AUTH_DIR}...`);
@@ -259,11 +278,19 @@ async function getCollegesAndBlocks() {
     }
 
     try {
-        const res = await axios.get(`${BACKEND_BASE}/api/blocks/online`, { timeout: 15000 });
-        if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+        let res = null;
+        try {
+            res = await axios.get(`${BACKEND_BASE}/api/blocks/online`, { timeout: 15000 });
+        } catch (e) {}
+        if (!res || !res.data || !Array.isArray(res.data) || res.data.length === 0) {
+            try {
+                res = await axios.get(`${BACKEND_BASE}/api/blocks`, { timeout: 15000 });
+            } catch (e) {}
+        }
+        if (res && res.data && Array.isArray(res.data) && res.data.length > 0) {
             const map = {};
             res.data.forEach(item => {
-                const col = item.college || 'Campus';
+                const col = (item.college || 'Campus').trim();
                 if (!map[col]) map[col] = [];
                 if (item.name && !map[col].includes(item.name)) {
                     map[col].push(item.name);
@@ -1134,8 +1161,132 @@ async function processOrderCreationAndPayment(sock, jid, session, senderName, se
 }
 
 let sock = null;
+let isBotInitialized = false;
+
+async function verifyBotApiKey() {
+    if (!BOT_API_KEY) return;
+    try {
+        console.log(`🔑 [DEDICATED KEY] Validating WhatsApp Bot API Key with backend...`);
+        const res = await axios.get(`${BACKEND_BASE}/api/college-config/verify-bot-key?key=${encodeURIComponent(BOT_API_KEY)}`, { timeout: 8000 });
+        if (res.data && res.data.valid && res.data.college) {
+            TARGET_COLLEGE = res.data.college.trim().toUpperCase();
+            IS_DEDICATED_BOT = true;
+            AUTH_DIR = getAuthDir();
+            PREFS_FILE = getPrefsFile();
+            console.log(`✅ [DEDICATED KEY VERIFIED] Authenticated successfully! Auto-locked to Campus: *${TARGET_COLLEGE}*`);
+        } else {
+            console.warn(`⚠️ Warning: Dedicated Bot Key not verified: ${res.data?.error || 'Unknown'}`);
+        }
+    } catch (err) {
+        console.warn(`⚠️ Notice: Could not verify Bot Key against backend:`, err.message);
+    }
+}
+
+let isLoggingOutRemotely = false;
+
+async function checkRemoteLogout() {
+    if (isLoggingOutRemotely) return;
+    try {
+        const queryCollege = TARGET_COLLEGE || '';
+        const url = `${BACKEND_BASE}/api/college-config/bot-status?college=${encodeURIComponent(queryCollege)}`;
+        const res = await axios.get(url, { timeout: 5000 });
+        const data = res.data;
+        if (data && data.logoutRequested === true) {
+            isLoggingOutRemotely = true;
+            const targetCol = data.college || TARGET_COLLEGE || 'Campus';
+            console.log(`\n=============================================================`);
+            console.log(`🚪 [REMOTE LOGOUT RECEIVED] Main Admin requested Bot Logout for: *${targetCol}*!`);
+            console.log(`=============================================================`);
+
+            // 1. Acknowledge logout to backend immediately so the flag resets
+            try {
+                await axios.post(`${BACKEND_BASE}/api/college-config/bot-ack-logout?college=${encodeURIComponent(targetCol)}`, null, { timeout: 5000 });
+                console.log(`✅ [ACKNOWLEDGED] Logout command acknowledged to backend.`);
+            } catch (ackErr) {
+                console.warn(`⚠️ Could not send ack-logout:`, ackErr.message);
+            }
+
+            // 2. Disconnect and logout Baileys socket
+            if (sock) {
+                try {
+                    console.log(`🔌 Unlinking WhatsApp session...`);
+                    await sock.logout();
+                } catch (e) {
+                    try { sock.end(); } catch (endErr) {}
+                }
+                sock = null;
+            }
+
+            // 3. Purge auth directory credentials completely
+            const authDirToClean = getAuthDir();
+            if (fs.existsSync(authDirToClean)) {
+                try {
+                    fs.rmSync(authDirToClean, { recursive: true, force: true });
+                    console.log(`🧹 WhatsApp credentials deleted: ${authDirToClean}`);
+                } catch (rmErr) {
+                    console.warn(`⚠️ Warning: Could not purge auth dir:`, rmErr.message);
+                }
+            }
+
+            const defaultAuth = path.join(__dirname, '.baileys_auth');
+            if (fs.existsSync(defaultAuth) && defaultAuth !== authDirToClean) {
+                try { fs.rmSync(defaultAuth, { recursive: true, force: true }); } catch (e) {}
+            }
+
+            // 4. Update qr_display.html
+            try {
+                const unlinkedHtml = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="3">
+<title>WhatsApp Bot Logged Out</title>
+<style>
+  body { background: #0f172a; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; font-family: system-ui, sans-serif; }
+  .card { background: white; padding: 32px; border-radius: 24px; text-align: center; color: #0f172a; box-shadow: 0 25px 50px rgba(0,0,0,0.5); }
+  h1 { color: #dc2626; margin: 0 0 8px 0; font-size: 22px; }
+  p { color: #64748b; margin: 0 0 20px 0; font-size: 14px; font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>🚪 WhatsApp Bot Unlinked</h1>
+    <p>Logged out by Main Admin. Generating a fresh QR code now...</p>
+  </div>
+</body>
+</html>`;
+                fs.writeFileSync(path.join(__dirname, '..', 'qr_display.html'), unlinkedHtml);
+            } catch (e) {}
+
+            console.log(`🔄 [QR RE-GENERATION] Generating a fresh QR code now...\n`);
+            setTimeout(async () => {
+                isLoggingOutRemotely = false;
+                await startBot();
+            }, 2500);
+        }
+    } catch (err) {
+        // Silently ignore network blips
+    }
+}
+
+// Background polling for Main Admin remote logout signals every 5 seconds
+setInterval(checkRemoteLogout, 5000);
 
 async function startBot() {
+    if (!isBotInitialized) {
+        await verifyBotApiKey();
+        isBotInitialized = true;
+    }
+
+    AUTH_DIR = getAuthDir();
+    PREFS_FILE = getPrefsFile();
+
+    if (IS_DEDICATED_BOT) {
+        console.log(`🏫 [DEDICATED BOT MODE] Active for Campus: *${TARGET_COLLEGE}*`);
+    } else {
+        console.log('🌐 [UNIFIED BOT MODE] Active in Multi-Campus Discovery Mode...');
+    }
+
     if (sock) {
         try { sock.ev.removeAllListeners(); } catch (e) {}
         try { sock.end(); } catch (e) {}
@@ -1169,22 +1320,25 @@ async function startBot() {
 
             try {
                 const dataUrl = await QRCodeImage.toDataURL(qr, { width: 320, margin: 2 });
+                const campusTitle = IS_DEDICATED_BOT ? `${TARGET_COLLEGE} WhatsApp Bot QR Code` : 'WhatsApp Bot QR Code';
                 const html = `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta http-equiv="refresh" content="5">
-<title>WhatsApp Bot QR Code</title>
+<title>${campusTitle}</title>
 <style>
   body { background: #0f172a; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; font-family: system-ui, sans-serif; }
   .card { background: white; padding: 32px; border-radius: 24px; text-align: center; color: #0f172a; box-shadow: 0 25px 50px rgba(0,0,0,0.5); }
   img { border-radius: 12px; border: 2px solid #e2e8f0; width: 280px; height: 280px; }
   h1 { color: #0284c7; margin: 0 0 8px 0; font-size: 22px; }
   p { color: #64748b; margin: 0 0 20px 0; font-size: 14px; font-weight: 600; }
+  .badge { display: inline-block; padding: 4px 10px; background: #e0f2fe; color: #0369a1; border-radius: 9999px; font-size: 12px; font-weight: 700; margin-bottom: 12px; }
 </style>
 </head>
 <body>
   <div class="card">
+    <div class="badge">${IS_DEDICATED_BOT ? `🏫 Dedicated: ${TARGET_COLLEGE}` : '🌐 Unified Multi-Campus Bot'}</div>
     <h1>📱 Scan with WhatsApp</h1>
     <p>WhatsApp &gt; Linked Devices &gt; Link a Device</p>
     <img src="${dataUrl}" alt="QR Code" />
@@ -1212,7 +1366,13 @@ async function startBot() {
             }
 
             if (isLoggedOut) {
-                console.log('❌ Device was logged out. Please restart and scan QR code.');
+                console.log('❌ Device was unlinked / logged out. Purging session credentials...');
+                const authDirToClean = getAuthDir();
+                if (fs.existsSync(authDirToClean)) {
+                    try { fs.rmSync(authDirToClean, { recursive: true, force: true }); } catch (e) {}
+                }
+                console.log('🔄 Restarting bot to generate a fresh QR code in 3s...');
+                setTimeout(startBot, 3000);
                 return;
             }
 
